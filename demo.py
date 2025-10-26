@@ -51,6 +51,22 @@ def demo(
     image = read_rgb_image(input_image_path)
     predictor = FaceMeshPredictor.dad_3dnet()
     predictions = predictor(image)
+    """
+(Pdb) predictions.keys()
+dict_keys(['points', 'projected_vertices', '3d_vertices', '3dmm_params'])
+(Pdb) predictions['points'].shape
+(68, 2)
+(Pdb) predictions['projected_vertices'].shape                                                      
+torch.Size([1, 5023, 2])
+(Pdb) predictions['projected_vertices'].shape                                                      
+torch.Size([1, 5023, 2])
+(Pdb) predictions['3d_vertices'].shape                                                             
+torch.Size([5023, 3])
+(Pdb) predictions['3dmm_params'].shape                                                             
+torch.Size([1, 413])
+(Pdb) q
+"""
+    breakpoint()
 
     # Get the resulting output.
     result = demo_funcs[type_of_output].processor(predictions, image)
@@ -58,7 +74,34 @@ def demo(
     saver = demo_funcs[type_of_output].saver()  # instantiate the Saver
     output_path = get_output_path(input_image_path, outputs_folder, type_of_output, saver.extension)
     saver(result, output_path)
+    print(f"Output saved to {output_path}")
 
 
 if __name__ == "__main__":
     Fire(demo)
+
+"""
+# Visualize 68 2D face landmarks
+python demo.py images/demo_heads/1.jpeg outputs 68_landmarks
+
+# Visualize 191 2D face landmarks
+python demo.py images/demo_heads/1.jpeg outputs 191_landmarks
+
+# Visualize 445 2D face landmarks
+python demo.py images/demo_heads/1.jpeg outputs 445_landmarks
+
+# Visualize face mesh
+python demo.py images/demo_heads/1.jpeg outputs face_mesh
+
+# Visualize head mesh
+python demo.py images/demo_heads/1.jpeg outputs head_mesh
+
+# Visualize head pose
+python demo.py images/demo_heads/1.jpeg outputs pose
+
+# Get 3D mesh .obj file
+python demo.py images/demo_heads/1.jpeg outputs 3d_mesh
+
+# Get flame parameters .json file
+python demo.py images/demo_heads/1.jpeg outputs flame_params
+"""

@@ -19,6 +19,35 @@ def train(config):
     train_dataset = FlameDataset.from_config(config=config["train"])
     val_dataset = FlameDataset.from_config(config=config["val"])
     model = load_model(config["model"], config["constants"])
+    """
+    (Pdb) type(model)
+<class 'model_training.model.flame_regression.FlameRegression'>
+(Pdb) config["model"]
+{
+    '_target_': 'model_training.model.flame_regression.FlameRegression', 
+    'model_config':{
+        'backbone': 'resnet50', 
+        'pretrained': True, 
+        'num_filters': 256, 
+        'num_channels': 3, 
+        'num_classes': 68, 
+        'img_size': 256, 
+        'conv_block': 'regular', 
+        'limit_value': 3
+    }
+}
+(Pdb) config["constants"]
+{
+    'shape': 300, 
+    'expression': 100, 
+    'jaw': 3, 
+    'rotation': 6, 
+    'eyeballs': 0, 
+    'neck': 0, 
+    'translation': 3, 
+    'scale': 1
+}
+"""
     dad3d_net = FlameLightningModel(model=model, config=config, train=train_dataset, val=val_dataset)
     dad3d_trainer = DAD3DTrainer(dad3d_net, config)
     dad3d_trainer.fit()

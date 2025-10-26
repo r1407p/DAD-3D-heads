@@ -2,3 +2,14 @@
 
 .DS_Store
 .idea
+
+wandb/
+venv/
+venv2/
+outputs/
+experiments/
+mesh/
+
+resnet50-0633-b00d1c8e.pth.zip
+boost_1_81_0/
+dataset/

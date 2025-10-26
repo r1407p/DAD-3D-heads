@@ -8,22 +8,42 @@ import pytorch_lightning as pl
 from model_training.utils import create_logger
 
 from pytorch_lightning import Trainer
-from pytorch_lightning.loggers import TensorBoardLogger, LightningLoggerBase
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import WandbLogger
 
 logger = create_logger(__file__)
 
 
-def _init_logger(config: Dict[str, Any]) -> List[LightningLoggerBase]:
-    if "experiment" not in config.keys():
-        return []
-    experiment_dir = os.path.join(config["experiment"]["folder"], config["experiment"]["name"])
-    version_tag = config["experiment"]["version"] if "version" in config["experiment"].keys() else 0
-    tt_logger = TensorBoardLogger(
-        save_dir=os.path.join(experiment_dir, "logs"),
-        version=version_tag,
-        name="logs",
-    )
-    return [tt_logger]
+def _init_logger(config: Dict[str, Any]):
+    loggers = []
+    if "experiment" in config.keys():
+        experiment_dir = os.path.join(config["experiment"]["folder"], config["experiment"]["name"])
+        version_tag = config["experiment"]["version"] if "version" in config["experiment"].keys() else 0
+        tt_logger = TensorBoardLogger(
+            save_dir=os.path.join(experiment_dir, "logs"),
+            version=version_tag,
+            name="logs",
+        )
+        loggers.append(tt_logger)
+    wandb_config = config.get("wandb", {})
+    breakpoint()
+    if wandb_config.get("enable", False):
+        wandb_logger = WandbLogger(
+            project=wandb_config.get("project", "default"),
+            entity=wandb_config.get("entity", None),
+            name=wandb_config.get("name", None),
+            group=wandb_config.get("group", None),
+            tags=wandb_config.get("tags", None),
+            save_dir=os.getcwd(),            # log 檔案儲存路徑
+            log_model=wandb_config.get("log_model", False),
+            mode=wandb_config.get("mode", None),   # "online"/"offline"/"disabled"
+            # id=wandb_config.get("id", None),       # 指定 run id 以便 resume
+            resume=wandb_config.get("resume", None)
+        )
+        wandb_logger.experiment.config.update(config, allow_val_change=True)
+        loggers.append(wandb_logger)
+    return loggers
+
 
 
 def get_callbacks(config: Dict[str, Any]) -> List[pl.Callback]:

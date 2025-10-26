@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler, ConcatData
 from torchmetrics import MetricCollection
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.loggers.base import DummyLogger
+# from pytorch_lightning.loggers.base import DummyLogger
 
 from model_training.data.config import (
     TARGET_2D_LANDMARKS,
@@ -243,10 +243,11 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
         self.epoch_num += 1
 
     def on_pretrain_routine_start(self) -> None:
-        if not isinstance(self.logger, DummyLogger):
-            for logger in self.logger:
-                if isinstance(logger, TensorBoardLogger):
-                    self.tensorboard_logger = logger
+        self.tensorboard_logger = self.logger
+        # if not isinstance(self.logger, DummyLogger):
+        #     for logger in self.logger:
+        #         if isinstance(logger, TensorBoardLogger):
+        #             self.tensorboard_logger = logger
 
     def on_pretrain_routine_end(self) -> None:
         optimizers = self.optimizers()

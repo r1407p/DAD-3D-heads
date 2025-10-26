@@ -15,3 +15,4 @@ defaults:
   - train_stage: flame_landmarks
   - property_overrides: flame_landmarks.academic
   - utility_overrides: local
+  - wandb: wandb
