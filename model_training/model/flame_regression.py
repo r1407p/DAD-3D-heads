@@ -37,7 +37,8 @@ class FusionLayer(nn.Module):
         heatmap = nn.functional.interpolate(
             heatmap, size=(original_h, original_w), mode="bilinear", align_corners=True
         ).sigmoid()
-        fmap = torch.cat([x, heatmap, bifpn_map], dim=1)
+        # fmap = torch.cat([x, heatmap, bifpn_map], dim=1)
+        fmap = torch.cat([x, bifpn_map], dim=1)
         fmap = self.conv1x1(fmap)
         return fmap * x
 
@@ -77,7 +78,7 @@ class FlameRegression(nn.Module):
         self.max_layer = 4
         self.limit_value = model_config["limit_value"]
         self.fusion_layer = FusionLayer(
-            model_config["num_filters"], model_config["num_classes"], self.encoder.encoder_channels["layer1"]
+            model_config["num_filters"], 0, self.encoder.encoder_channels["layer1"]
         )
 
         self.shape = ClassificationHead(self.encoder.encoder_channels["layer0"], 403)
