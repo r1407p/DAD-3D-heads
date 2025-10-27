@@ -4,6 +4,8 @@ import os
 from fire import Fire
 from pytorch_toolbelt.utils import read_rgb_image
 
+
+
 from predictor import FaceMeshPredictor
 from demo_utils import (
     draw_landmarks,
@@ -18,6 +20,9 @@ from demo_utils import (
     MeshSaver,
     ImageSaver,
     JsonSaver,
+    get_depth,
+    get_face_region,
+    get_face_depth
 )
 
 DemoFuncs = namedtuple(
@@ -35,7 +40,10 @@ demo_funcs = {
     "uv_texture": DemoFuncs(get_uv_texture, ImageSaver),
     "pncc": DemoFuncs(get_pncc, ImageSaver),
     "3d_mesh": DemoFuncs(get_mesh, MeshSaver),
-    "flame_params": DemoFuncs(get_flame_params, JsonSaver)
+    "flame_params": DemoFuncs(get_flame_params, JsonSaver),
+    "depth": DemoFuncs(get_depth, ImageSaver),
+    "face_region": DemoFuncs(get_face_region, ImageSaver),
+    "face_depth": DemoFuncs(get_face_depth, ImageSaver),
 }
 
 
@@ -58,15 +66,13 @@ dict_keys(['points', 'projected_vertices', '3d_vertices', '3dmm_params'])
 (68, 2)
 (Pdb) predictions['projected_vertices'].shape                                                      
 torch.Size([1, 5023, 2])
-(Pdb) predictions['projected_vertices'].shape                                                      
-torch.Size([1, 5023, 2])
 (Pdb) predictions['3d_vertices'].shape                                                             
 torch.Size([5023, 3])
 (Pdb) predictions['3dmm_params'].shape                                                             
 torch.Size([1, 413])
 (Pdb) q
 """
-    breakpoint()
+    # breakpoint()
 
     # Get the resulting output.
     result = demo_funcs[type_of_output].processor(predictions, image)
@@ -104,4 +110,10 @@ python demo.py images/demo_heads/1.jpeg outputs 3d_mesh
 
 # Get flame parameters .json file
 python demo.py images/demo_heads/1.jpeg outputs flame_params
+
+# Get face region
+python demo.py images/demo_heads/1.jpeg outputs face_region
+
+# Get face depth
+python demo.py images/demo_heads/1.jpeg outputs face_depth
 """
