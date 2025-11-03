@@ -26,7 +26,6 @@ def _init_logger(config: Dict[str, Any]):
         )
         loggers.append(tt_logger)
     wandb_config = config.get("wandb", {})
-    breakpoint()
     if wandb_config.get("enable", False):
         wandb_logger = WandbLogger(
             project=wandb_config.get("project", "default"),

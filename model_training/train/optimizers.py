@@ -33,6 +33,7 @@ def get_optimizer(model: nn.Module, optimizer_config: Dict[str, Any]) -> pytorch
     else:
         optimizer_cls = optim.get(optimizer_name)
 
-    parameters: List[nn.Parameter] = list(filter(lambda x: x[1].requires_grad, model.parameters()))
+    parameters: List[nn.Parameter] = [p for p in model.parameters() if p.requires_grad]
+
     optimizer: pytorch_optim.Optimizer = optimizer_cls(parameters)
     return optimizer

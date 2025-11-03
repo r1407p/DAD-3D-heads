@@ -94,7 +94,6 @@ class LossModule(nn.Module):
             output_keys.append(output_key)
             target_keys.append(target_key)
             schedule.append(epoch_start)
-
         return LossModule(
             names=names,
             output_keys=output_keys,

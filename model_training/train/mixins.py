@@ -13,6 +13,8 @@ from model_training.data.config import (
     TARGET_2D_FULL_LANDMARKS,
     TARGET_2D_LANDMARKS_PRESENCE,
     INPUT_BBOX_KEY,
+    TARGET_FACE_REGION,
+    TARGET_FACE_DEPTH,
 )
 from model_training.model.flame import uint8_to_float32
 from model_training.data import INPUT_IMAGE_KEY
@@ -40,6 +42,8 @@ class KeypointsDataMixin:
                 TARGET_2D_FULL_LANDMARKS,
                 TARGET_2D_LANDMARKS_PRESENCE,
                 INPUT_BBOX_KEY,
+                TARGET_FACE_REGION,
+                TARGET_FACE_DEPTH,
             ]
         }
         for key, gt_map in targets.items():
@@ -49,6 +53,9 @@ class KeypointsDataMixin:
             targets[key] = gt_map
         targets[TARGET_LANDMARKS_HEATMAP] = uint8_to_float32(targets[TARGET_LANDMARKS_HEATMAP])
         targets[INPUT_BBOX_KEY] = torch.stack(targets[INPUT_BBOX_KEY]).T
+        # breakpoint()
+        # targets[TARGET_FACE_REGION] = torch.from_numpy(targets[TARGET_FACE_REGION])
+        # targets[TARGET_FACE_DEPTH] = torch.from_numpy(targets[TARGET_FACE_DEPTH])
         return inputs, targets
 
 

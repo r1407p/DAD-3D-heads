@@ -20,6 +20,10 @@ from model_training.data.config import (
     TARGET_2D_FULL_LANDMARKS,
     TARGET_2D_LANDMARKS_PRESENCE,
     INPUT_BBOX_KEY,
+    OUTPUT_FACE_REGION,
+    OUTPUT_FACE_DEPTH,
+    TARGET_FACE_REGION,
+    TARGET_FACE_DEPTH,
 )
 from model_training.model.utils import unravel_index, normalize_to_cube, load_from_lighting
 from model_training.head_mesh import HeadMesh

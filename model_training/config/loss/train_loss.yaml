@@ -48,3 +48,19 @@ criterions:
     loss:
       _target_: model_training.losses.LandmarksLossWVisibility
       criterion: smooth_l1
+
+  - name: depth_loss
+    target_key: TARGET_FACE_DEPTH
+    output_key: OUTPUT_FACE_DEPTH
+    weight: 1.
+    loss:
+      _target_: model_training.losses.DepthLoss
+      criterion: smooth_l1
+
+  - name: region_loss
+    target_key: TARGET_FACE_REGION
+    output_key: OUTPUT_FACE_REGION
+    weight: 1.
+    loss:
+      _target_: model_training.losses.RegionLoss
+      criterion: bce

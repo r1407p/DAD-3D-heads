@@ -18,6 +18,46 @@ torch.autograd.set_detect_anomaly(True)
 def train(config):
     train_dataset = FlameDataset.from_config(config=config["train"])
     val_dataset = FlameDataset.from_config(config=config["val"])
+    breakpoint()
+    # train_dataset[0]
+    """
+(Pdb) train_dataset[0].keys()
+dict_keys(['INPUT_IMAGE_KEY', 'INPUT_BBOX_KEY', 'TARGET_3D_MODEL_VERTICES', 'TARGET_2D_LANDMARKS', 'TARGET_2D_FULL_LANDMARKS', 'TARGET_2D_LANDMARKS_PRESENCE', 'TARGET_LANDMARKS_HEATMAP', 'SAMPLE_INDEX_KEY', 'IMAGE_FILENAME_KEY'])
+(Pdb) train_dataset[0]['IMAGE_FILENAME_KEY']
+'DAD-3DHeadsDataset/train/images/1893059d-c23c-4eb7-9669-d21668bac3e9.png'
+(Pdb) train_dataset[0].keys()
+dict_keys(['INPUT_IMAGE_KEY', 'INPUT_BBOX_KEY', 'TARGET_3D_MODEL_VERTICES', 'TARGET_2D_LANDMARKS', 'TARGET_2D_FULL_LANDMARKS', 'TARGET_2D_LANDMARKS_PRESENCE', 'TARGET_LANDMARKS_HEATMAP', 'SAMPLE_INDEX_KEY', 'IMAGE_FILENAME_KEY'])
+(Pdb) train_dataset[0]['INPUT_BBOX_KEY'].shape
+*** AttributeError: 'tuple' object has no attribute 'shape'
+(Pdb) train_dataset[0]['INPUT_BBOX_KEY']
+(2, 1, 193, 283)
+(Pdb) train_dataset[0].keys()
+dict_keys(['INPUT_IMAGE_KEY', 'INPUT_BBOX_KEY', 'TARGET_3D_MODEL_VERTICES', 'TARGET_2D_LANDMARKS', 'TARGET_2D_FULL_LANDMARKS', 'TARGET_2D_LANDMARKS_PRESENCE', 'TARGET_LANDMARKS_HEATMAP', 'SAMPLE_INDEX_KEY', 'IMAGE_FILENAME_KEY'])
+(Pdb) train_dataset[0]['INPUT_BBOX_KEY'].shape
+*** AttributeError: 'tuple' object has no attribute 'shape'
+(Pdb) train_dataset[0]['INPUT_IMAGE_KEY'].shape
+torch.Size([3, 256, 256])
+(Pdb) train_dataset[0]['SAMPLE_INDEX_KEY']
+0
+(Pdb) train_dataset[0]['TARGET_3D_MODEL_VERTICES'].shape
+(5023, 3)
+(Pdb) train_dataset[0]['TARGET_2D_LANDMARKS'].shape
+(68, 2)
+(Pdb) train_dataset[0]['TARGET_2D_FULL_LANDMARKS'].shape
+(5023, 2)
+(Pdb) train_dataset[0]['TARGET_2D_LANDMARKS_PRESENCE'].shape
+(68,)
+(Pdb) train_dataset[0]['TARGET_LANDMARKS_HEATMAP'].shape
+(68, 64, 64)
+(Pdb) train_dataset[0]['INPUT_IMAGE_KEY'].shape
+torch.Size([3, 256, 256])
+(Pdb) train_dataset[0]['SAMPLE_INDEX_KEY']
+0
+(Pdb) train_dataset[0]['IMAGE_FILENAME_KEY']
+'DAD-3DHeadsDataset/train/images/1893059d-c23c-4eb7-9669-d21668bac3e9.png'
+(Pdb) 
+
+    """
     model = load_model(config["model"], config["constants"])
     """
     (Pdb) type(model)
