@@ -59,6 +59,7 @@ def demo(
     image = read_rgb_image(input_image_path)
     predictor = FaceMeshPredictor.dad_3dnet()
     predictions = predictor(image)
+    breakpoint()
     """
 (Pdb) predictions.keys()
 dict_keys(['points', 'projected_vertices', '3d_vertices', '3dmm_params'])

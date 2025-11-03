@@ -51,26 +51,30 @@ def train(config):
     # load weight
 
     model = torch.jit.load("/home/cytseng/git/DAD-3DHeads/experiments/train/2025-10-22-00-38-57/academic_experiment/checkpoints/epoch_0119-valid_metrics_reproject_nme_2d_1.7283.trcd")
+    model = torch.jit.load("/home/cytseng/git/DAD-3DHeads/experiments/train/2025-10-26-18-08-27/predict_but_no_fusion/checkpoints/epoch_0105-valid_metrics_reproject_nme_2d_2.7243.trcd")
 
     dad3d_net = FlameLightningModel(model=model, config=config, train=train_dataset, val=val_dataset)
     dad3d_trainer = DAD3DTrainer(dad3d_net, config)
     # dad3d_trainer.fit()
     result = dad3d_trainer.trainer.validate(dad3d_net)
+    breakpoint()
     dad3d_trainer.dad3d_net = dad3d_trainer.dad3d_net.to("cuda")
+    dad3d_trainer.dad3d_net.eval()
 
     outputs = defaultdict(list)
     targets = defaultdict(list)
-    for batch in dad3d_trainer.dad3d_net.val_dataloader():
-        
-        tmp = dad3d_trainer.dad3d_net.validation_step(batch, 0)
-        loss = tmp["loss"]
-        metrics = tmp["metrics_dict"]
-        output = tmp["output_dict"]
-        target = tmp["target_dict"]
-        for key, value in output.items():
-            outputs[key].append(value)
-        for key, value in target.items():
-            targets[key].append(value)
+    with torch.no_grad():
+        for batch in dad3d_trainer.dad3d_net.val_dataloader():
+            
+            tmp = dad3d_trainer.dad3d_net.validation_step(batch, 0)
+            loss = tmp["loss"]
+            metrics = tmp["metrics_dict"]
+            output = tmp["output_dict"]
+            target = tmp["target_dict"]
+            for key, value in output.items():
+                outputs[key].append(value)
+            for key, value in target.items():
+                targets[key].append(value)
 
     breakpoint()
 
@@ -91,7 +95,6 @@ def prepare_experiment(hydra_config: DictConfig) -> Dict[str, Any]:
 def run_experiment(hydra_config: DictConfig) -> None:
     config = prepare_experiment(hydra_config)
     logger.info("Experiment dir %s" % config["experiment"]["folder"])
-    breakpoint()
     train(config)
 
 

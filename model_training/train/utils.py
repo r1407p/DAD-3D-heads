@@ -26,22 +26,22 @@ def _init_logger(config: Dict[str, Any]):
         )
         loggers.append(tt_logger)
     wandb_config = config.get("wandb", {})
-    breakpoint()
-    if wandb_config.get("enable", False):
-        wandb_logger = WandbLogger(
-            project=wandb_config.get("project", "default"),
-            entity=wandb_config.get("entity", None),
-            name=wandb_config.get("name", None),
-            group=wandb_config.get("group", None),
-            tags=wandb_config.get("tags", None),
-            save_dir=os.getcwd(),            # log 檔案儲存路徑
-            log_model=wandb_config.get("log_model", False),
-            mode=wandb_config.get("mode", None),   # "online"/"offline"/"disabled"
-            # id=wandb_config.get("id", None),       # 指定 run id 以便 resume
-            resume=wandb_config.get("resume", None)
-        )
-        wandb_logger.experiment.config.update(config, allow_val_change=True)
-        loggers.append(wandb_logger)
+    # breakpoint()
+    # if wandb_config.get("enable", False):
+    #     wandb_logger = WandbLogger(
+    #         project=wandb_config.get("project", "default"),
+    #         entity=wandb_config.get("entity", None),
+    #         name=wandb_config.get("name", None),
+    #         group=wandb_config.get("group", None),
+    #         tags=wandb_config.get("tags", None),
+    #         save_dir=os.getcwd(),            # log 檔案儲存路徑
+    #         log_model=wandb_config.get("log_model", False),
+    #         mode=wandb_config.get("mode", None),   # "online"/"offline"/"disabled"
+    #         # id=wandb_config.get("id", None),       # 指定 run id 以便 resume
+    #         resume=wandb_config.get("resume", None)
+    #     )
+    #     wandb_logger.experiment.config.update(config, allow_val_change=True)
+    #     loggers.append(wandb_logger)
     return loggers
 
 

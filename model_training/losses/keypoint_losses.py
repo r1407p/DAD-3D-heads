@@ -19,7 +19,7 @@ class IoULoss(nn.Module):
             op_sum(y_true ** 2) + op_sum(y_pred ** 2) - op_sum(y_true * y_pred) + _EPSILON
         )
 
-        loss = torch.mean(loss)
+        # loss = torch.mean(loss)
         return loss
 
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:

@@ -42,7 +42,8 @@ class Vertices3DLoss(nn.Module):
 
         v_losses = []
         for w, i in zip(self.weights, self.indices):
-            loss = self.criterion(*tuple(map(normalize_to_cube, (pred_vertices[:, i], target[:, i])))) * w
+            # loss = self.criterion(*tuple(map(normalize_to_cube, (pred_vertices[:, i], target[:, i])))) * w
+            loss = torch.mean((normalize_to_cube(pred_vertices[:, i]) - normalize_to_cube(target[:, i])) ** 2, dim=1) * w
             v_losses.append(loss)
 
-        return torch.stack(v_losses).sum()
+        return torch.stack(v_losses).sum(axis=0)

@@ -69,6 +69,7 @@ class FaceMeshPredictor:
     def __init__(self, config: Dict[str, Any], cuda_id: int = 0):
         self.cuda_id = cuda_id
         self.flame_constants = config["constants"]
+        print(f"model_path: {os.path.join(os.path.expanduser('~'), config['model_path'])}")
         self.model = torch.jit.load(os.path.join(os.path.expanduser('~'), config["model_path"]))
         self.model = to_device(self.model, self.cuda_id).eval()
         self.head_mesh = HeadMesh(self.flame_constants)
@@ -186,6 +187,7 @@ class FaceMeshPredictor:
         return idx
 
     def postprocess(self, x: Tuple[torch.Tensor, torch.Tensor], cache: Dict[str, Any], *kw: Any) -> Dict[str, Any]:
+        breakpoint()
         output = self._parse_output(x)
         predictions = self._get_predictions(output, cache)
         if "points" in predictions.keys():

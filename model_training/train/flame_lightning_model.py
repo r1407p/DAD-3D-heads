@@ -9,7 +9,7 @@ from torchmetrics import MetricCollection
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
 # from pytorch_lightning.loggers.base import DummyLogger
-
+import pickle
 from model_training.data.config import (
     TARGET_2D_LANDMARKS,
     OUTPUT_LANDMARKS_HEATMAP,
@@ -209,7 +209,12 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
 
     def validation_step(self, batch: Dict[str, Any], batch_nb: int) -> Dict[str, Any]:
         batch = any2device(batch, self.device)
-        return self._step_fn(batch, batch_nb, loader_name="valid")
+        
+        res =  self._step_fn(batch, batch_nb, loader_name="valid")
+        # with open(f"no_fusion_validation_step_{batch_nb}.pkl", "wb") as f:
+        #     pickle.dump(res, f)
+        return res
+
 
     def _get_optim(self, model: torch.nn.Module, optimizer_config: Dict[str, Any]) -> torch.optim.Optimizer:
         """Creates model optimizer from Trainer config
@@ -303,14 +308,16 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
         total_loss, loss_dict = self.criterion(outputs, targets, self.epoch_num)
 
         process_2d_branch = OUTPUT_2D_LANDMARKS in outputs.keys() or OUTPUT_LANDMARKS_HEATMAP in outputs.keys()
+        target_dict = targets
+        output_dict = outputs
+        metrics_dict = {}
 
         if process_2d_branch:
+            iou_value = self.iou_metric(outputs[OUTPUT_LANDMARKS_HEATMAP].sigmoid(), targets[TARGET_LANDMARKS_HEATMAP])
+            metrics_dict["heatmap_iou"] = iou_value
             self.log(
                 f"{loader_name}/metrics/heatmap_iou",
-                self.iou_metric(
-                    outputs[OUTPUT_LANDMARKS_HEATMAP].sigmoid(),
-                    targets[TARGET_LANDMARKS_HEATMAP],
-                ),
+                iou_value,
                 on_epoch=True,
             )
 
@@ -318,7 +325,10 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
             targets_2d = (
                 targets[TARGET_2D_LANDMARKS] * targets[TARGET_2D_LANDMARKS_PRESENCE][..., None] * self._img_size
             )
+            output_dict["outputs_2d"] = outputs_2d
+            target_dict["targets_2d"] = targets_2d
             metrics_2d = self.metrics_2d(outputs_2d, {"keypoints": targets_2d, "bboxes": targets[INPUT_BBOX_KEY]})
+            metrics_dict["metrics_2d"] = metrics_2d
             for metric_name, metric_value in metrics_2d.items():
                 self.log(
                     f"{loader_name}/metrics/{metric_name}",
@@ -328,12 +338,15 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
 
         params_3dmm = outputs[OUTPUT_3DMM_PARAMS]
         projected_vertices = self.head_mesh.reprojected_vertices(params_3dmm=params_3dmm, to_2d=True)
+        output_dict["projected_vertices"] = projected_vertices
         reprojected_pred = projected_vertices[:, self.flame_indices["face"]]
+        output_dict["reprojected_pred"] = reprojected_pred
         reprojected_gt = targets[TARGET_2D_FULL_LANDMARKS][:, self.flame_indices["face"]]
+        output_dict["reprojected_gt"] = reprojected_gt
         reprojected_metrics = self.metrics_reprojection(
             reprojected_pred, {"keypoints": reprojected_gt, "bboxes": targets[INPUT_BBOX_KEY]}
         )
-
+        metrics_dict["reprojected_metrics"] = reprojected_metrics
         for metric_name, metric_value in reprojected_metrics.items():
             self.log(
                 f"{loader_name}/metrics/{metric_name}",
@@ -342,6 +355,7 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
             )
 
         pred_3d_vertices = self.head_mesh.vertices_3d(params_3dmm=params_3dmm, zero_rotation=True)
+        output_dict["pred_3d_vertices"] = pred_3d_vertices
         metrics_3d = self.metrics_3d(
             normalize_to_cube(pred_3d_vertices[:, self.flame_indices["face"]]),
             {
@@ -350,7 +364,7 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
                 )
             },
         )
-
+        metrics_dict["metrics_3d"] = metrics_3d
         for metric_name, metric_value in metrics_3d.items():
             self.log(
                 f"{loader_name}/metrics/{metric_name}",
@@ -366,7 +380,25 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
                 prog_bar=True,
                 sync_dist=self.use_ddp,
             )
-        return {"loss": total_loss}
+        # for metric_name, metric_value in metrics_dict.items():
+        #     self.log(
+        #         f"{loader_name}/metrics/{metric_name}",
+        #         metric_value,
+        #         on_epoch=True,
+        #     )
+        # for output_key, output_value in output_dict.items():
+        #     self.log(
+        #         f"{loader_name}/output/{output_key}",
+        #         output_value,
+        #         on_epoch=True,
+        #     )
+        # for target_key, target_value in target_dict.items():
+        #     self.log(
+        #         f"{loader_name}/target/{target_key}",
+        #         target_value,
+        #         on_epoch=True,
+        #     )
+        return {"loss": total_loss, "metrics_dict": metrics_dict, "output_dict": output_dict, "target_dict": target_dict}
 
     def on_train_epoch_start(self) -> None:
         super().on_train_epoch_start()
