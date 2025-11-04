@@ -113,8 +113,8 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
                 model = load_from_lighting(self.model, weights_path)
         return model
 
-    def forward(self, x: Any) -> Any:
-        return self.model(x)
+    def forward(self, x: Any, depth: Any, region: Any) -> Any:
+        return self.model(x, depth, region)
 
     def compute_loss(
             self, loss: Union[torch.Tensor, Dict[str, torch.Tensor], List[torch.Tensor]]
@@ -301,7 +301,9 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
 
     def _step_fn(self, batch: Dict[str, Any], batch_nb: int, loader_name: str):
         images, targets = self.get_input(batch)
-        outputs = self.forward(images)
+        depths = targets[TARGET_FACE_DEPTH]
+        regions = targets[TARGET_FACE_REGION]
+        outputs = self.forward(images, depths, regions)
         total_loss, loss_dict = self.criterion(outputs, targets, self.epoch_num)
 
         process_2d_branch = OUTPUT_2D_LANDMARKS in outputs.keys() or OUTPUT_LANDMARKS_HEATMAP in outputs.keys()

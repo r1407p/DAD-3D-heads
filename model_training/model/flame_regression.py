@@ -126,15 +126,15 @@ class FlameRegression(nn.Module):
         self.pose = ClassificationHead(self.encoder.encoder_channels["layer0"], 10)
         self.landmarks = ClassificationHead(self.encoder.encoder_channels["layer0"], num_classes * 2)
 
-    def forward(self, x):
+    def forward(self, x, depth, region):
         encoder_output = []
         for stage in self.encoder.stages[: self.max_layer]:
             x = stage(x)
             encoder_output.append(x)
         decoder_output = self.bifpn(encoder_output[1:])
         heatmap = self.head(decoder_output)
-        depth = self.depth(decoder_output)
-        region = self.region(decoder_output)
+        # depth = self.depth(decoder_output)
+        # region = self.region(decoder_output)
         fmap = self.fusion_layer(x, heatmap, depth, region, decoder_output[2])
         fmap = self.encoder.stages[-1](fmap)
         shape = self.shape(fmap).tanh() * self.limit_value
