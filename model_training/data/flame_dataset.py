@@ -2,12 +2,16 @@ import os
 import json
 from typing import Dict, Any, List, Union, Tuple, Optional
 from collections import namedtuple
+import cv2
+import numpy as np
 import torch
 from torch.utils.data import Dataset
-import numpy as np
-from hydra.utils import instantiate
+
 import albumentations as A
 import pytorch_toolbelt.utils as pt_utils
+from skimage.draw import polygon
+
+from hydra.utils import instantiate
 
 from model_training.data.config import (
     IMAGE_FILENAME_KEY,
@@ -22,10 +26,19 @@ from model_training.data.config import (
     TARGET_LANDMARKS_HEATMAP,
     TARGET_2D_FULL_LANDMARKS,
     TARGET_2D_LANDMARKS_PRESENCE,
+    TARGET_FACE_REGION,
+    TARGET_FACE_DEPTH,
 )
 from model_training.data.transforms import get_resize_fn, get_normalize_fn
-from model_training.data.utils import ensure_bbox_boundaries, extend_bbox, read_as_rgb, get_68_landmarks
+from model_training.data.utils import (
+    ensure_bbox_boundaries,
+    extend_bbox,
+    read_as_rgb,
+    get_68_landmarks,
+)
 from model_training.utils import load_2d_indices, create_logger
+
+from utils import get_relative_path
 
 MeshArrays = namedtuple(
     "MeshArrays",
@@ -52,19 +65,26 @@ class FlameDataset(Dataset):
         self.img_size = config["img_size"]
         self.filename_key = "img_path"
         self.aug_pipeline = self._get_aug_pipeline(config["transform"])
+        self.resize_fn = get_resize_fn(self.img_size, mode=config["transform"].get("resize_mode", "longest_max_size"))
+        self.normalize_t = get_normalize_fn(config["transform"].get("normalize", "imagenet"))
 
         self.num_classes = config.get("num_classes")
         self.keypoints_indices = load_2d_indices(config["keypoints"])
+
         self.tensor_keys = [INPUT_IMAGE_KEY]
         self.coder = instantiate(config["coder"], config, self.num_classes)
+
+        self.mesh_faces = self._load_mesh_faces()
+        self.face_vertex_set = self._get_face_vertex_set()
+        self.face_faces = self._select_face_triangles(self.mesh_faces, self.face_vertex_set)
 
     def __len__(self) -> int:
         return len(self.data)
 
     def __getitem__(self, idx: int) -> Optional[Dict[str, Any]]:
-        item_anno = self._get_item_anno(idx=idx)
-        item_data = self._parse_anno(item_anno)
-        item_data = self._transform(item_data)
+        item_anno = self._get_item_anno(idx=idx)  # metadata of the image ex: bbox, image path, etc.
+        original_item_data = self._parse_anno(item_anno)
+        item_data = self._transform(original_item_data)
         item_dict = self._form_anno_dict(item_data)
         item_dict = self._add_index(idx, item_anno, item_dict)
         item_dict = self._convert_images_to_tensors(item_dict)
@@ -84,11 +104,111 @@ class FlameDataset(Dataset):
             anno = json.load(json_file)
         return cls(data=anno, config=config)
 
+
+    @staticmethod
+    def _load_mesh_faces() -> np.ndarray:
+        faces_path = get_relative_path("../model/static/flame_mesh_faces.pt", __file__)
+        faces = torch.load(faces_path)
+        if isinstance(faces, torch.Tensor):
+            faces = faces.cpu().numpy()
+        return faces.astype(np.int32)
+
+    @staticmethod
+    def _get_face_vertex_set() -> Optional[np.ndarray]:
+        base_dir = get_relative_path("../model/static/flame_indices", __file__)
+        candidates = ["face_vertices.npy", "face_verts.npy", "face_indices.npy"]
+        for name in candidates:
+            p = os.path.join(base_dir, name)
+            if os.path.exists(p):
+                v = np.load(p)
+                return np.unique(v.astype(np.int32))
+        # fallback by edges
+        p_edges = os.path.join(base_dir, "face_edges.npy")
+        if os.path.exists(p_edges):
+            edges = np.load(p_edges).astype(np.int32)  # [E,2]
+            return np.unique(edges.reshape(-1))
+        return None
+
+    @staticmethod
+    def _select_face_triangles(faces: np.ndarray, face_vs: Optional[np.ndarray]) -> np.ndarray:
+        if face_vs is None or face_vs.size == 0:
+            return faces
+        keep = np.isin(faces, face_vs).all(axis=1)
+        return faces[keep]
+
+    @staticmethod
+    def _rasterize_depth_and_mask(
+        xy_crop: np.ndarray,
+        depth_per_vert: np.ndarray,
+        faces: np.ndarray,
+        crop_w: int,
+        crop_h: int,
+        valid_vert_mask: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        depth = np.full((crop_h, crop_w), np.inf, dtype=np.float32)
+        mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
+
+        if valid_vert_mask is None:
+            valid_vert_mask = np.ones(len(xy_crop), dtype=bool)
+
+        for (i, j, k) in faces:
+            if not (valid_vert_mask[i] and valid_vert_mask[j] and valid_vert_mask[k]):
+                continue
+
+            tri = xy_crop[[i, j, k], :]  # [[x,y],[x,y],[x,y]]
+            if not np.all(np.isfinite(tri)):
+                continue
+
+            rr, cc = polygon(tri[:, 1], tri[:, 0], shape=(crop_h, crop_w))
+            if rr.size == 0:
+                continue
+
+            ax, ay = tri[0]; bx, by = tri[1]; cx, cy = tri[2]
+            den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+            if abs(den) < 1e-8:
+                continue
+
+            px = cc + 0.5
+            py = rr + 0.5
+            alpha = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / den
+            beta = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / den
+            gamma = 1.0 - alpha - beta
+
+            z_tri = depth_per_vert[[i, j, k]]  # [3]
+            z_interp = alpha * z_tri[0] + beta * z_tri[1] + gamma * z_tri[2]
+
+            cur = depth[rr, cc]
+            closer = z_interp < cur
+            if np.any(closer):
+                depth[rr[closer], cc[closer]] = z_interp[closer]
+                mask[rr[closer], cc[closer]] = 1  # 0/1
+
+        valid = (mask > 0) & np.isfinite(depth)
+        depth01 = np.zeros_like(depth, dtype=np.float32)
+        if np.any(valid):
+            dmin = float(depth[valid].min())
+            dmax = float(depth[valid].max())
+            denom = max(dmax - dmin, 1e-8)
+            depth01[valid] = (depth[valid] - dmin) / denom
+
+        # resize to [64 * 64]
+        depth01 = cv2.resize(depth01, (64, 64), interpolation=cv2.INTER_LINEAR)
+        mask = cv2.resize(mask, (64, 64), interpolation=cv2.INTER_NEAREST)
+        return depth01, mask
+
     def _convert_images_to_tensors(self, item_data: Dict[str, Any]) -> Dict[str, Any]:
         if item_data is not None:
             for key, item in item_data.items():
                 if isinstance(item, np.ndarray) and key in self.tensor_keys:
                     item_data[key] = pt_utils.image_to_tensor(item.astype("float32"))
+        for k in (TARGET_FACE_DEPTH, TARGET_FACE_REGION):
+            if k in item_data and isinstance(item_data[k], np.ndarray):
+                arr = item_data[k].astype(np.float32)
+                if arr.ndim == 2:
+                    arr = arr[None, ...]
+                item_data[k] = torch.from_numpy(arr)
+        return item_data
+
         return item_data
 
     def _parse_anno(self, item_anno: Dict[str, Any]) -> Dict[str, Any]:
@@ -181,6 +301,24 @@ class FlameDataset(Dataset):
         result = self.aug_pipeline(
             image=item_data[INPUT_IMAGE_KEY], keypoints=np.concatenate((vertices_2d_subset, vertices_2d), 0)
         )
+        verts2d_aug = np.array(result["keypoints"][self.num_classes:], dtype=np.float32)
+
+        verts3d_world_homo = item_data[TARGET_3D_WORLD_VERTICES]  # [N,4]
+        z = verts3d_world_homo[:, 2].astype(np.float32)
+        depth_per_vert = -z if np.median(z) < 0 else z
+
+        faces = self.face_faces if (self.face_faces is not None and self.face_faces.size > 0) else self.mesh_faces
+
+        H_aug, W_aug = result["image"].shape[:2]
+        valid = np.isfinite(verts2d_aug).all(axis=1)
+        depth01, region01 = self._rasterize_depth_and_mask(
+            xy_crop=verts2d_aug,
+            depth_per_vert=depth_per_vert,
+            faces=faces,
+            crop_w=W_aug,
+            crop_h=H_aug,
+            valid_vert_mask=valid,
+        )
 
         return {
             INPUT_IMAGE_KEY: result["image"],
@@ -188,7 +326,10 @@ class FlameDataset(Dataset):
             TARGET_3D_MODEL_VERTICES: item_data[TARGET_3D_MODEL_VERTICES],
             TARGET_2D_LANDMARKS: np.array(result["keypoints"][: self.num_classes], dtype=np.float32),
             TARGET_2D_FULL_LANDMARKS: np.array(result["keypoints"][self.num_classes :], dtype=np.float32),
-            TARGET_2D_LANDMARKS_PRESENCE: presence_subset
+            TARGET_2D_LANDMARKS_PRESENCE: presence_subset,
+            INPUT_SIZE_KEY: item_data[INPUT_SIZE_KEY],
+            TARGET_FACE_DEPTH: depth01.astype(np.float32),   # [64,64], 0~1
+            TARGET_FACE_REGION: region01.astype(np.float32), # [64,64], 0/1
         }
 
     def _form_anno_dict(self, item_data: Dict[str, np.ndarray]) -> Dict[str, Union[torch.Tensor, np.ndarray]]:
