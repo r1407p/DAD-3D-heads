@@ -13,6 +13,8 @@ from model_training.data.config import (
     TARGET_2D_FULL_LANDMARKS,
     TARGET_2D_LANDMARKS_PRESENCE,
     INPUT_BBOX_KEY,
+    TARGET_FACE_DEPTH,
+    TARGET_FACE_REGION,
 )
 from model_training.model.flame import uint8_to_float32
 from model_training.data import INPUT_IMAGE_KEY
@@ -40,6 +42,8 @@ class KeypointsDataMixin:
                 TARGET_2D_FULL_LANDMARKS,
                 TARGET_2D_LANDMARKS_PRESENCE,
                 INPUT_BBOX_KEY,
+                TARGET_FACE_DEPTH,
+                TARGET_FACE_REGION,
             ]
         }
         for key, gt_map in targets.items():
