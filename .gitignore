@@ -13,3 +13,5 @@ mesh/
 resnet50-0633-b00d1c8e.pth.zip
 boost_1_81_0/
 dataset/
+data/
+output_results

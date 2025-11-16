@@ -48,3 +48,29 @@ criterions:
     loss:
       _target_: model_training.losses.LandmarksLossWVisibility
       criterion: smooth_l1
+
+  - name: region_iou
+    target_key: TARGET_FACE_REGION
+    output_key: OUTPUT_REGION
+    weight: 1.0
+    loss:
+      _target_: model_training.losses.IoULoss
+
+  - name: region_bce
+    target_key: TARGET_FACE_REGION
+    output_key: OUTPUT_REGION
+    weight: 1.0
+    loss:
+      _target_: model_training.losses.BCELoss
+
+
+  - name: depth_smoothl1_masked
+    target_key:
+      - TARGET_FACE_DEPTH         # target depth
+      - TARGET_FACE_REGION        # mask
+    output_key:
+      - OUTPUT_DEPTH              # pred logits
+    weight: 2
+    loss:
+      _target_: model_training.losses.SigmoidSmoothL1Masked
+      beta: 1.0
