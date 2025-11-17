@@ -64,9 +64,14 @@ class FlameDataset(Dataset):
 
         self.img_size = config["img_size"]
         self.filename_key = "img_path"
-        self.aug_pipeline = self._get_aug_pipeline(config["transform"])
-        self.resize_fn = get_resize_fn(self.img_size, mode=config["transform"].get("resize_mode", "longest_max_size"))
+
+        self.use_precomputed_maps = bool(config.get("use_precomputed_maps", True))
+
+        resize = get_resize_fn(self.img_size, mode=config["transform"].get("resize_mode", "longest_max_size"))
+        self.aug_geom = A.ReplayCompose([resize], keypoint_params=A.KeypointParams(format="xy", remove_invisible=False))
         self.normalize_t = get_normalize_fn(config["transform"].get("normalize", "imagenet"))
+
+        self.aug_pipeline = self._get_aug_pipeline(config["transform"])
 
         self.num_classes = config.get("num_classes")
         self.keypoints_indices = load_2d_indices(config["keypoints"])
@@ -135,6 +140,30 @@ class FlameDataset(Dataset):
             return faces
         keep = np.isin(faces, face_vs).all(axis=1)
         return faces[keep]
+
+    def _resolve_item_path(self, raw_path: str, kind: str) -> Optional[str]:
+        ds_root = os.path.normpath(self.config["dataset_root"])
+        ds_name = os.path.basename(ds_root)
+        rp = (raw_path or "").replace("\\", "/")
+
+        cands = []
+        if os.path.isabs(rp):
+            cands.append(rp)
+        cands.append(os.path.join(ds_root, rp))
+        if rp.startswith(ds_name + "/"):
+            stripped = rp[len(ds_name) + 1 :]
+            cands.append(os.path.join(ds_root, stripped))
+        base = os.path.basename(rp)
+        for split in ["train", "val", "test"]:
+            cands.append(os.path.join(ds_root, split, kind, base))
+        for split in ["train/", "val/", "test/"]:
+            if rp.startswith(split):
+                cands.append(os.path.join(ds_root, rp))
+
+        for p in cands:
+            if p and os.path.exists(p):
+                return os.path.normpath(p)
+        return None
 
     @staticmethod
     def _rasterize_depth_and_mask(
@@ -212,23 +241,61 @@ class FlameDataset(Dataset):
         return item_data
 
     def _parse_anno(self, item_anno: Dict[str, Any]) -> Dict[str, Any]:
-        img = read_as_rgb(os.path.join(self.config["dataset_root"], item_anno["img_path"]))
+        img_path = self._resolve_item_path(item_anno["img_path"], kind="images") \
+                   or os.path.join(self.config["dataset_root"], item_anno["img_path"])
+        mesh_path = self._resolve_item_path(item_anno["annotation_path"], kind="annotations") \
+                    or os.path.join(self.config["dataset_root"], item_anno["annotation_path"])
+
+        img = read_as_rgb(img_path)
         bbox = item_anno["bbox"]
         offset = tuple(0.1 * np.random.uniform(size=4) + 0.05)
         x, y, w, h = ensure_bbox_boundaries(extend_bbox(np.array(bbox), offset), img.shape[:2])
         cropped_img = img[y : y + h, x : x + w]
-        (
-            flame_vertices3d,
-            flame_vertices3d_world_homo,
-            projection_matrix,
-        ) = self._load_mesh(os.path.join(self.config["dataset_root"], item_anno["annotation_path"]))
+
+        flame_vertices3d, flame_vertices3d_world_homo, projection_matrix = self._load_mesh(mesh_path)
+
+        pre_depth_crop = None
+        pre_region_crop = None
+        if self.use_precomputed_maps:
+            images_dir = os.path.dirname(img_path)           # .../<split>/images
+            split_dir = os.path.dirname(images_dir)          # .../<split>
+            base = os.path.splitext(os.path.basename(img_path))[0]
+            depth_path = os.path.join(split_dir, "depth_map",  base + ".png")
+            region_path = os.path.join(split_dir, "regionmap", base + ".png")
+
+            if not os.path.exists(depth_path):
+                alt = depth_path.replace("DAD-3DHeadsDataset" + os.sep, "")
+                if os.path.exists(alt):
+                    depth_path = alt
+            if not os.path.exists(region_path):
+                alt = region_path.replace("DAD-3DHeadsDataset" + os.sep, "")
+                if os.path.exists(alt):
+                    region_path = alt
+
+            if os.path.exists(depth_path) and os.path.exists(region_path):
+                d_full = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+                r_full = cv2.imread(region_path, cv2.IMREAD_GRAYSCALE)
+                if d_full is not None and r_full is not None:
+                    if d_full.dtype == np.uint16:
+                        d_full = d_full.astype(np.float32) / 65535.0
+                    elif d_full.dtype == np.uint8:
+                        d_full = d_full.astype(np.float32) / 255.0
+                    else:
+                        d_full = d_full.astype(np.float32)  # 已是 float 的情況
+                    r_full = (r_full > 127).astype(np.float32)
+
+                    pre_depth_crop  = d_full[y : y + h, x : x + w]
+                    pre_region_crop = r_full[y : y + h, x : x + w]
+
         return {
             INPUT_IMAGE_KEY: cropped_img,
             INPUT_BBOX_KEY: (x, y, w, h),
             INPUT_SIZE_KEY: img.shape,
             TARGET_3D_MODEL_VERTICES: flame_vertices3d,
             TARGET_3D_WORLD_VERTICES: flame_vertices3d_world_homo,
-            TARGET_PROJECTION_MATRIX: projection_matrix
+            TARGET_PROJECTION_MATRIX: projection_matrix,
+            "PRE_DEPTH_CROP": pre_depth_crop,
+            "PRE_REGION_CROP": pre_region_crop,
         }
 
     @staticmethod
@@ -297,6 +364,47 @@ class FlameDataset(Dataset):
             item_data[INPUT_SIZE_KEY],
             item_data[INPUT_BBOX_KEY],
         )
+
+        pre_depth = item_data.get("PRE_DEPTH_CROP", None)
+        pre_region = item_data.get("PRE_REGION_CROP", None)
+        use_pre = self.use_precomputed_maps and (pre_depth is not None) and (pre_region is not None)
+
+        if use_pre:
+            geom_out = self.aug_geom(
+                image=item_data[INPUT_IMAGE_KEY],
+                keypoints=np.concatenate((vertices_2d_subset, vertices_2d), 0)
+            )
+            img_geom = geom_out["image"]
+            keypoints_aug = geom_out["keypoints"]
+            verts2d_aug = np.array(keypoints_aug[self.num_classes:], dtype=np.float32)
+
+            maps_out = A.ReplayCompose.replay(
+                geom_out["replay"],
+                image=item_data["PRE_DEPTH_CROP"].astype(np.float32),
+                mask=item_data["PRE_REGION_CROP"].astype(np.uint8),
+                keypoints=np.concatenate((vertices_2d_subset, vertices_2d), 0)
+            )
+            depth_aug  = maps_out["image"].astype(np.float32)        # [H_aug, W_aug], 0~1
+            region_aug = maps_out["mask"].astype(np.float32)         # 0/1
+
+            norm_out = self.normalize_t(image=img_geom)
+            img_aug = norm_out["image"]
+
+            H_aug, W_aug = img_aug.shape[:2]
+            depth01 = cv2.resize(depth_aug,  (64, 64), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+            region01 = cv2.resize(region_aug, (64, 64), interpolation=cv2.INTER_NEAREST).astype(np.float32)
+
+            return {
+                INPUT_IMAGE_KEY: img_aug,
+                INPUT_BBOX_KEY: item_data[INPUT_BBOX_KEY],
+                TARGET_3D_MODEL_VERTICES: item_data[TARGET_3D_MODEL_VERTICES],
+                TARGET_2D_LANDMARKS: np.array(keypoints_aug[: self.num_classes], dtype=np.float32),
+                TARGET_2D_FULL_LANDMARKS: np.array(keypoints_aug[self.num_classes :], dtype=np.float32),
+                TARGET_2D_LANDMARKS_PRESENCE: presence_subset,
+                INPUT_SIZE_KEY: item_data[INPUT_SIZE_KEY],
+                TARGET_FACE_DEPTH: depth01,    # [64,64], 0~1
+                TARGET_FACE_REGION: region01,  # [64,64], 0/1
+            }
 
         result = self.aug_pipeline(
             image=item_data[INPUT_IMAGE_KEY], keypoints=np.concatenate((vertices_2d_subset, vertices_2d), 0)
