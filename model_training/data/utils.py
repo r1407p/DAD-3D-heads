@@ -33,6 +33,24 @@ def read_as_rgb(x: str) -> np.ndarray:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     return img
 
+def read_as_depth(x: str) -> np.ndarray: # 1 channel depth map
+    img = cv2.imread(x, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        logger.warning(f"Can not read image {x} with OpenCV, switching to scikit-image")
+        img = sk_imread(x)[:, :, 0:1]
+    else:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return img
+
+def read_as_region(x: str) -> np.ndarray: # 0/255 region map
+    img = cv2.imread(x, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        logger.warning(f"Can not read image {x} with OpenCV, switching to scikit-image")
+        img = sk_imread(x)[:, :, 0:1] > 127
+    else:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) > 127
+    return img
+
 
 def pointwise_gaussian_2d() -> np.ndarray:
     pos_kernel = np.float32([[0.5, 0.75, 0.5], [0.75, 1.0, 0.75], [0.5, 0.75, 0.5]])
