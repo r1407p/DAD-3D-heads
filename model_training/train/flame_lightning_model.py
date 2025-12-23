@@ -15,6 +15,8 @@ from model_training.data.config import (
     OUTPUT_LANDMARKS_HEATMAP,
     TARGET_LANDMARKS_HEATMAP,
     OUTPUT_3DMM_PARAMS,
+    OUTPUT_3D_VERTICES,
+    OUTPUT_2D_VERTICES,
     TARGET_3D_MODEL_VERTICES,
     OUTPUT_2D_LANDMARKS,
     TARGET_2D_FULL_LANDMARKS,
@@ -328,9 +330,8 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
                     on_epoch=True,
                 )
 
-        params_3dmm = outputs[OUTPUT_3DMM_PARAMS]
-        projected_vertices = self.head_mesh.reprojected_vertices(params_3dmm=params_3dmm, to_2d=True)
-        reprojected_pred = projected_vertices[:, self.flame_indices["face"]]
+        # Use pre-computed vertices from model output
+        reprojected_pred = outputs[OUTPUT_2D_VERTICES][:, self.flame_indices["face"]]
         reprojected_gt = targets[TARGET_2D_FULL_LANDMARKS][:, self.flame_indices["face"]]
         reprojected_metrics = self.metrics_reprojection(
             reprojected_pred, {"keypoints": reprojected_gt, "bboxes": targets[INPUT_BBOX_KEY]}
@@ -343,7 +344,8 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
                 on_epoch=True,
             )
 
-        pred_3d_vertices = self.head_mesh.vertices_3d(params_3dmm=params_3dmm, zero_rotation=True)
+        # Use pre-computed 3D vertices from model output
+        pred_3d_vertices = outputs[OUTPUT_3D_VERTICES]
         metrics_3d = self.metrics_3d(
             normalize_to_cube(pred_3d_vertices[:, self.flame_indices["face"]]),
             {

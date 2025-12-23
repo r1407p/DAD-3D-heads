@@ -6,11 +6,12 @@ from torch import nn, Tensor
 from model_training.utils import indices_reweighing
 from model_training.head_mesh import HeadMesh
 
-__all__ = ["ReprojectionLoss"]
+__all__ = ["ReprojectionLoss", "ReprojectionLossDirect"]
 losses = {"l1": nn.L1Loss, "l2": nn.MSELoss, "smooth_l1": nn.SmoothL1Loss}
 
 
 class ReprojectionLoss(nn.Module):
+    """Original loss that computes 2D vertices from 3DMM params internally."""
     def __init__(self, criterion, batch_size, consts, img_size, weights_and_indices):
         super().__init__()
         if criterion not in losses.keys():
@@ -41,6 +42,39 @@ class ReprojectionLoss(nn.Module):
 
         for w, i in zip(self.weights, self.indices):
             loss = self.criterion(projected_vertices[:, i], full_target[:, i]) * w
+            c_losses.append(loss)
+
+        return torch.stack(c_losses).sum()
+
+
+class ReprojectionLossDirect(nn.Module):
+    """Loss that accepts pre-computed 2D projected vertices directly from model output."""
+    def __init__(self, criterion, weights_and_indices):
+        super().__init__()
+        if criterion not in losses.keys():
+            raise ValueError(f"Unsupported discrepancy loss type {criterion}")
+        self.criterion = losses[criterion]()
+        self.weights, self.indices = indices_reweighing(weights_and_indices)
+
+    @torch.cuda.amp.autocast(False)
+    def forward(self, predicted: Tensor, target: Union[Tensor, List[Tensor]]) -> Tensor:
+        """
+        Args:
+            predicted: [B, V, 2] - pre-computed 2D projected vertices from model
+            target: [B, V, 2] - ground truth 2D vertices
+
+        Returns:
+            Loss tensor
+        """
+        c_losses = []
+
+        if isinstance(target, list):
+            full_target = target[0]
+        else:
+            full_target = target
+
+        for w, i in zip(self.weights, self.indices):
+            loss = self.criterion(predicted[:, i], full_target[:, i]) * w
             c_losses.append(loss)
 
         return torch.stack(c_losses).sum()

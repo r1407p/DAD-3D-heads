@@ -2,10 +2,19 @@ from typing import Dict, Any
 
 import torch
 import torch.nn as nn
-from model_training.data.config import OUTPUT_LANDMARKS_HEATMAP, OUTPUT_3DMM_PARAMS, OUTPUT_2D_LANDMARKS, OUTPUT_DEPTH, OUTPUT_REGION
+from model_training.data.config import (
+    OUTPUT_LANDMARKS_HEATMAP,
+    OUTPUT_3DMM_PARAMS,
+    OUTPUT_2D_LANDMARKS,
+    OUTPUT_DEPTH,
+    OUTPUT_REGION,
+    OUTPUT_3D_VERTICES,
+    OUTPUT_2D_VERTICES,
+)
 from model_training.model.encoders import get_encoder
 from model_training.model.bifpn import BiFPN
 from model_training.model.layers import IdentityLayer
+from model_training.head_mesh import HeadMesh
 from torch.nn import functional as F
 
 __all__ = ["FlameRegression"]
@@ -125,6 +134,17 @@ class FlameRegression(nn.Module):
         self.shape = ClassificationHead(self.encoder.encoder_channels["layer0"], 403)
         self.pose = ClassificationHead(self.encoder.encoder_channels["layer0"], 10)
         self.landmarks = ClassificationHead(self.encoder.encoder_channels["layer0"], num_classes * 2)
+        
+        # HeadMesh for computing 3D vertices and 2D reprojected vertices
+        self._img_size = model_config["img_size"]
+        self.head_mesh = HeadMesh(
+            flame_config=consts_config,
+            batch_size=1,  # Will work with any batch size
+            image_size=self._img_size
+        )
+        # freeze the head mesh
+        for param in self.head_mesh.parameters():
+            param.requires_grad = False
 
     def forward(self, x):
         encoder_output = []
@@ -143,10 +163,18 @@ class FlameRegression(nn.Module):
         B, N = landmarks.size()
         landmarks = F.relu(landmarks.reshape((B, N // 2, 2)), inplace=True)
 
+        params_3dmm = torch.cat([shape, pose], dim=1)
+        
+        # Compute 3D vertices and 2D reprojected vertices from 3DMM params
+        vertices_3d = self.head_mesh.vertices_3d(params_3dmm=params_3dmm, zero_rotation=True)
+        vertices_2d = self.head_mesh.reprojected_vertices(params_3dmm=params_3dmm, to_2d=True)
+
         return {
             OUTPUT_LANDMARKS_HEATMAP: heatmap,
             OUTPUT_DEPTH: depth,
             OUTPUT_REGION: region,
-            OUTPUT_3DMM_PARAMS: torch.cat([shape, pose], dim=1),
+            OUTPUT_3DMM_PARAMS: params_3dmm,
             OUTPUT_2D_LANDMARKS: landmarks,
+            OUTPUT_3D_VERTICES: vertices_3d,
+            OUTPUT_2D_VERTICES: vertices_2d,
         }

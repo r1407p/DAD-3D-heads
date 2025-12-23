@@ -198,3 +198,4 @@ if __name__ == "__main__":
     
     run_test()
 
+# CUDA_VISIBLE_DEVICES=2,3 python test.py --checkpoint_path experiments/train/2025-12-21-14-35-05/train_on_all_fusion_on_all/checkpoints/epoch_0106-valid_metrics_reproject_nme_2d_1.6748.ckpt

@@ -11,13 +11,11 @@ criterions:
   -
     name: vertices3d_loss
     target_key: TARGET_3D_MODEL_VERTICES
-    output_key: OUTPUT_3DMM_PARAMS
+    output_key: OUTPUT_3D_VERTICES  # Now uses pre-computed 3D vertices from model
     weight: 50.
     loss:
-      _target_: model_training.losses.Vertices3DLoss
+      _target_: model_training.losses.Vertices3DLossDirect
       criterion: l2 # choose from {l1, l2, smooth_l1}
-      batch_size: ${batch_size}
-      consts: ${constants}
       weights_and_indices:
         flame_indices: ${train.flame_indices}
         weights: {'head': .5, 'face_w_ears': .75, 'face': 1.}
@@ -25,14 +23,11 @@ criterions:
 
   - name: reprojection_loss
     target_key: TARGET_2D_FULL_LANDMARKS
-    output_key: OUTPUT_3DMM_PARAMS
+    output_key: OUTPUT_2D_VERTICES  # Now uses pre-computed 2D vertices from model
     weight: 0.05
     loss:
-      _target_: model_training.losses.ReprojectionLoss
+      _target_: model_training.losses.ReprojectionLossDirect
       criterion: smooth_l1
-      batch_size: ${batch_size}
-      consts: ${constants}
-      img_size: ${train.img_size}
       weights_and_indices:
         flame_indices: ${train.flame_indices}
         weights: {'face': .5, 'face_w_ears': .5}
