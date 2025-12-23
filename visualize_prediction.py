@@ -27,12 +27,13 @@ from model_training.data.config import (
     OUTPUT_2D_LANDMARKS,
     OUTPUT_LANDMARKS_HEATMAP,
     OUTPUT_3DMM_PARAMS,
+    OUTPUT_3D_VERTICES,
+    OUTPUT_2D_VERTICES,
     OUTPUT_DEPTH,
     OUTPUT_REGION,
 )
 from model_training.model.utils import unravel_index, normalize_to_cube
 from model_training.train.utils import any2device
-from model_training.head_mesh import HeadMesh
 from model_training.metrics.iou import SoftIoUMetric
 from model_training.metrics.keypoints import FailureRate, KeypointsNME
 
@@ -245,13 +246,6 @@ def visualize_prediction(
     for key, value in config_all["train"]["flame_indices"]["files"].items():
         flame_indices[key] = np.load(os.path.join(config_all["train"]["flame_indices"]["folder"], value))
     
-    # Initialize HeadMesh for 3D metrics
-    head_mesh = HeadMesh(
-        flame_config=config_all["constants"],
-        batch_size=batch_size,
-        image_size=img_size
-    ).to(device)
-    
     # ========== Initialize Loss Accumulators ==========
     loss_accumulators = {}
     loss_counts = {}
@@ -288,7 +282,6 @@ def visualize_prediction(
         # Run inference
         with torch.no_grad():
             output = dad3d_net.model(input_image)
-        # dict_keys(['OUTPUT_LANDMARKS_HEATMAP', 'OUTPUT_DEPTH', 'OUTPUT_REGION', 'OUTPUT_3DMM_PARAMS', 'OUTPUT_2D_LANDMARKS'])
         
         # ========== Compute Losses (same as test.py) ==========
         with torch.no_grad():
@@ -332,26 +325,22 @@ def visualize_prediction(
             targets_2d = targets[TARGET_2D_LANDMARKS] * presence[..., None] * img_size
             metrics_2d(outputs_2d, {"keypoints": targets_2d, "bboxes": targets[INPUT_BBOX_KEY]})
         
-        # Reprojection metrics (3D mesh projected to 2D)
-        if OUTPUT_3DMM_PARAMS in output and TARGET_2D_FULL_LANDMARKS in targets:
-            params_3dmm = output[OUTPUT_3DMM_PARAMS]
-            projected_vertices = head_mesh.reprojected_vertices(params_3dmm=params_3dmm, to_2d=True)
-            reprojected_pred = projected_vertices[:, flame_indices["face"]]
+        # Reprojection metrics (3D mesh projected to 2D) - use pre-computed vertices
+        if OUTPUT_2D_VERTICES in output and TARGET_2D_FULL_LANDMARKS in targets:
+            reprojected_pred = output[OUTPUT_2D_VERTICES][:, flame_indices["face"]]
             reprojected_gt = targets[TARGET_2D_FULL_LANDMARKS][:, flame_indices["face"]]
             metrics_reprojection(
                 reprojected_pred,
                 {"keypoints": reprojected_gt, "bboxes": targets[INPUT_BBOX_KEY]}
             )
         
-        # 3D vertices metrics
-        if OUTPUT_3DMM_PARAMS in output and TARGET_3D_MODEL_VERTICES in targets:
-            params_3dmm = output[OUTPUT_3DMM_PARAMS]
-            pred_3d_vertices = head_mesh.vertices_3d(params_3dmm=params_3dmm, zero_rotation=True)
+        # 3D vertices metrics - use pre-computed vertices
+        if OUTPUT_3D_VERTICES in output and TARGET_3D_MODEL_VERTICES in targets:
+            pred_3d_vertices = output[OUTPUT_3D_VERTICES]
             metrics_3d(
                 normalize_to_cube(pred_3d_vertices[:, flame_indices["face"]]),
                 {"keypoints": normalize_to_cube(targets[TARGET_3D_MODEL_VERTICES][:, flame_indices["face"]])}
             )
-        breakpoint()
         
         # ========== Save Visualizations (if enabled) ==========
         if save_images:
@@ -380,10 +369,15 @@ def visualize_prediction(
             else:
                 img_gt_hm = img_bgr.copy()
             
-            # GT Full landmarks (projected vertices)
+            # GT Full landmarks (projected vertices) - used for reproject_nme_2d metric
             if TARGET_2D_FULL_LANDMARKS in item:
                 verts2d_gt = item[TARGET_2D_FULL_LANDMARKS].astype(np.float32)
-                img_gt_proj = draw_points(img_bgr, verts2d_gt, color=(0, 255, 0), radius=1)
+                # Use face subset if available (same as metrics)
+                if "face" in flame_indices:
+                    verts2d_gt_face = verts2d_gt[flame_indices["face"]]
+                else:
+                    verts2d_gt_face = verts2d_gt
+                img_gt_proj = draw_points(img_bgr, verts2d_gt_face, color=(0, 255, 0), radius=1)
             else:
                 img_gt_proj = img_bgr.copy()
             
@@ -432,7 +426,7 @@ def visualize_prediction(
             
             # Pred Depth
             if OUTPUT_DEPTH in output:
-                depth_pred = output[OUTPUT_DEPTH].detach().cpu().numpy()[0, 0]  # [H, W]
+                depth_pred = torch.sigmoid(output[OUTPUT_DEPTH]).detach().cpu().numpy()[0, 0]  # [H, W]
                 depth_pred = np.clip(depth_pred, 0, 1)
                 depth_pred_u8 = (depth_pred * 255.0).astype(np.uint8)
                 depth_pred_u8 = cv2.resize(depth_pred_u8, (W_vis, H_vis), interpolation=cv2.INTER_LINEAR)
@@ -454,12 +448,24 @@ def visualize_prediction(
                 region_pred_color = np.zeros_like(img_bgr)
                 img_pred_region_overlay = img_bgr.copy()
             
+            # Pred Reprojected Vertices (OUTPUT_2D_VERTICES) - used for reproject_nme_2d metric
+            if OUTPUT_2D_VERTICES in output:
+                verts2d_pred = output[OUTPUT_2D_VERTICES].detach().cpu().numpy()[0]  # [N, 2]
+                # Use face subset if available (same as metrics)
+                if "face" in flame_indices:
+                    verts2d_pred_face = verts2d_pred[flame_indices["face"]]
+                else:
+                    verts2d_pred_face = verts2d_pred
+                img_pred_proj = draw_points(img_bgr, verts2d_pred_face.astype(np.float32), color=(255, 0, 0), radius=1)
+            else:
+                img_pred_proj = img_bgr.copy()
+            
             # ========== Create Comparison Images ==========
             comp_landmarks = create_comparison_image(img_gt_kp, img_pred_kp, "GT Landmarks", "Pred Landmarks")
             comp_heatmap = create_comparison_image(img_gt_hm, img_pred_hm, "GT Heatmap", "Pred Heatmap")
             comp_depth = create_comparison_image(img_gt_depth_overlay, img_pred_depth_overlay, "GT Depth", "Pred Depth")
             comp_region = create_comparison_image(img_gt_region_overlay, img_pred_region_overlay, "GT Region", "Pred Region")
-            comp_projected = create_comparison_image(img_gt_proj, img_bgr, "GT Projected", "Input")
+            comp_projected = create_comparison_image(img_gt_proj, img_pred_proj, "GT Reprojected", "Pred Reprojected")
             
             # ========== Save Images ==========
             cv2.imwrite(os.path.join(item_dir, "input.png"), img_bgr)
@@ -478,6 +484,8 @@ def visualize_prediction(
             cv2.imwrite(os.path.join(item_dir, "pred_depth.png"), depth_pred_color)
             cv2.imwrite(os.path.join(item_dir, "gt_region.png"), region_gt_color)
             cv2.imwrite(os.path.join(item_dir, "pred_region.png"), region_pred_color)
+            cv2.imwrite(os.path.join(item_dir, "gt_reprojected.png"), img_gt_proj)
+            cv2.imwrite(os.path.join(item_dir, "pred_reprojected.png"), img_pred_proj)
             
             # Save metadata
             x, y, w, h = item[INPUT_BBOX_KEY]
