@@ -47,7 +47,10 @@ def visualize(subset: str, id: str, base_path: str = 'dataset', outputs_folder: 
 
     output_filename = get_output_path(img_path, outputs_folder, 'GT_landmarks', '.png')
     cv2.imwrite(output_filename, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+    print(f"Saved {output_filename}")
 
 
 if __name__ == "__main__":
     Fire(visualize)
+
+# python visualize.py train 0a0abe06-e7d8-4547-a53b-9e87d5ecf5b4

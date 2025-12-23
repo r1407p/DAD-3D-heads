@@ -4,6 +4,7 @@ from typing import Dict, Any
 import numpy as np
 import cv2
 import torch
+from tqdm import tqdm
 
 from model_training.data import FlameDataset
 from model_training.data.config import (
@@ -65,7 +66,7 @@ def visualize_dataset(train_config_path: str, output_dir: str, max_items: int = 
     norm_name = train_cfg.get("transform", {}).get("normalize", "imagenet")
     img_size = dataset.img_size
 
-    for idx in range(len(dataset)):
+    for idx in tqdm(range(len(dataset))):
         if max_items is not None and idx >= max_items:
             break
 
@@ -146,7 +147,7 @@ def visualize_dataset(train_config_path: str, output_dir: str, max_items: int = 
         breakpoint()
 if __name__ == "__main__":
     train_config_path = "config.json"
-    output_dir = "visualize/train_dataset"
+    output_dir = "visualize/train_dataset_precomputed"
     visualize_dataset(train_config_path, output_dir, max_items=None)
 
 

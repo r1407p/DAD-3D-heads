@@ -70,8 +70,10 @@ def prepare_experiment(hydra_config: DictConfig) -> Dict[str, Any]:
 def run_experiment(hydra_config: DictConfig) -> None:
     config = prepare_experiment(hydra_config)
     logger.info("Experiment dir %s" % config["experiment"]["folder"])
+    print(config)
     train(config)
 
 
 if __name__ == "__main__":
+    print("Running experiment")
     run_experiment()

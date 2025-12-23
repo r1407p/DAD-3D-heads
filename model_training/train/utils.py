@@ -40,7 +40,7 @@ def _init_logger(config: Dict[str, Any]):
             # id=wandb_config.get("id", None),       # 指定 run id 以便 resume
             resume=wandb_config.get("resume", None)
         )
-        wandb_logger.experiment.config.update(config, allow_val_change=True)
+        # wandb_logger.experiment.config.update(config, allow_val_change=True)
         loggers.append(wandb_logger)
     return loggers
 
