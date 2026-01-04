@@ -4,6 +4,7 @@ from .landmarks_loss_w_visibility import LandmarksLossWVisibility
 from .keypoint_losses import IoULoss
 from .bce_loss import BCELoss
 from .sigmoid_smoothl1_masked import SigmoidSmoothL1Masked
+from .regular_loss import RegularLoss
 
 __all__ = ["Vertices3DLoss", "Vertices3DLossDirect", "ReprojectionLoss", "ReprojectionLossDirect",
-           "LandmarksLossWVisibility", "IoULoss", "BCELoss", "SigmoidSmoothL1Masked"]
+           "LandmarksLossWVisibility", "IoULoss", "BCELoss", "SigmoidSmoothL1Masked", "RegularLoss"]

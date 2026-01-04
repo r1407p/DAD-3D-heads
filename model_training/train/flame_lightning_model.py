@@ -4,11 +4,13 @@ import typing
 from typing import Dict, Any, Optional, Tuple, List, Union, Callable
 import numpy as np
 import torch
+import cv2
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, ConcatDataset
 from torchmetrics import MetricCollection
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
 # from pytorch_lightning.loggers.base import DummyLogger
+from skimage.draw import polygon
 
 from model_training.data.config import (
     TARGET_2D_LANDMARKS,
@@ -24,6 +26,8 @@ from model_training.data.config import (
     INPUT_BBOX_KEY,
     TARGET_FACE_DEPTH,
     TARGET_FACE_REGION,
+    OUTPUT_3D_VERTICES_REFINED,
+    OUTPUT_2D_VERTICES_REFINED,
 )
 from model_training.model.utils import unravel_index, normalize_to_cube, load_from_lighting
 from model_training.head_mesh import HeadMesh
@@ -35,10 +39,13 @@ from model_training.train.optimizers import get_optimizer
 from model_training.train.schedulers import get_scheduler
 from model_training.train.utils import any2device
 from model_training.utils import create_logger
+from model_training.data.utils import get_68_landmarks
 
 
 logger = create_logger(__name__)
 
+
+NEW_METRICS_ENABLED = False
 
 class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisualizationMixin):
 
@@ -97,7 +104,49 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
                 "nme_3d": KeypointsNME(compute_on_step=True),
             }
         )
+
+        # New metrics: Mesh-to-depth and Mesh-to-landmarks
+        self.mesh_to_depth_iou_metric = SoftIoUMetric(compute_on_step=True)
+        self.mesh_to_landmarks_metrics = MetricCollection(
+            {
+                "mesh_fr_2d_005": FailureRate(compute_on_step=True, threshold=0.05, below=True),
+                "mesh_fr_2d_01": FailureRate(compute_on_step=True, threshold=0.1, below=True),
+                "mesh_nme_2d": KeypointsNME(compute_on_step=True),
+            }
+        )
+
+        # New metrics: refined 3d vertices metrics
+        self.metrics_refined_reprojection = MetricCollection(
+            {
+                "refine_reproject_fr_2d_005": FailureRate(compute_on_step=True, threshold=0.05, below=True),
+                "refine_reproject_fr_2d_01": FailureRate(compute_on_step=True, threshold=0.1, below=True),
+                "refine_reproject_nme_2d": KeypointsNME(compute_on_step=True),
+            }
+        )
+
+        self.metrics_refined_3d = MetricCollection(
+            {
+                "refine_fr_3d_005": FailureRate(compute_on_step=True, threshold=0.05, below=True),
+                "refine_fr_3d_01": FailureRate(compute_on_step=True, threshold=0.1, below=True),
+                "refine_nme_3d": KeypointsNME(compute_on_step=True),
+            }
+        )
         # endregion
+        # Load mesh faces for depth rasterization
+        from utils import get_relative_path
+        faces_path = get_relative_path("../model/static/flame_mesh_faces.pt", __file__)
+        mesh_faces = torch.load(faces_path)
+        if isinstance(mesh_faces, torch.Tensor):
+            mesh_faces = mesh_faces.cpu().numpy()
+        self.mesh_faces = mesh_faces.astype(np.int32)
+        
+        # Get face faces if available (from dataset)
+        self.face_faces = None
+        try:
+            if hasattr(self.train_dataset, 'face_faces') and self.train_dataset.face_faces is not None:
+                self.face_faces = self.train_dataset.face_faces
+        except:
+            pass
 
     @property
     def is_master(self) -> bool:
@@ -301,6 +350,121 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
             return outputs[OUTPUT_2D_LANDMARKS] * self._img_size
         return float(self.stride) * unravel_index(outputs[OUTPUT_LANDMARKS_HEATMAP]).flip(-1)
 
+    def _extract_68_landmarks_from_mesh(self, params_3dmm: torch.Tensor) -> torch.Tensor:
+        """Extract 68 landmarks from 3DMM params by generating 3D vertices and projecting."""
+        device = params_3dmm.device
+        batch_size = params_3dmm.shape[0]
+        
+        # Get flame params
+        flame_params = self.head_mesh.flame_params(params_3dmm)
+        # Generate vertices with rotation (for projection)
+        vertices_3d_world = self.head_mesh.flame.forward(flame_params, zero_rot=False)  # [B, N, 3]
+        
+        # Extract 68 landmarks from world vertices
+        # Process each sample in batch separately to handle device properly
+        landmarks_2d_list = []
+        for b in range(batch_size):
+            vertices_3d_world_flat = vertices_3d_world[b].view(-1, 3)  # [N, 3]
+            # get_68_landmarks may return CPU tensor, so move to CPU first, then back to device
+            vertices_3d_world_flat_cpu = vertices_3d_world_flat.detach().cpu()
+            landmarks_3d_world_68_cpu = get_68_landmarks(vertices_3d_world_flat_cpu)  # [68, 3] on CPU
+            landmarks_3d_world_68 = landmarks_3d_world_68_cpu.to(device).unsqueeze(0)  # [1, 68, 3] on device
+            
+            # Apply scale and translation (same as reprojected_vertices)
+            scale_b = torch.clamp(flame_params.scale[b:b+1, None] + 1.0, 1e-8)  # [1, 1]
+            landmarks_3d_world_68 = landmarks_3d_world_68 * scale_b
+            translation_b = flame_params.translation[b:b+1].clone()  # [1, 3]
+            translation_b[..., 2] = 0.0
+            landmarks_3d_world_68 = landmarks_3d_world_68 + translation_b[:, None, :]
+            
+            # Project to 2D: (v + 1) / 2 * img_size
+            landmarks_2d_68 = (landmarks_3d_world_68[..., :2] + 1.0) / 2.0 * self._img_size  # [1, 68, 2]
+            landmarks_2d_list.append(landmarks_2d_68)
+        
+        return torch.cat(landmarks_2d_list, dim=0)  # [B, 68, 2]
+    
+    def _generate_depth_from_mesh(self, params_3dmm: torch.Tensor) -> torch.Tensor:
+        """Generate depth map from 3DMM params by generating world vertices and rasterizing."""
+        # Generate 3D vertices in world space (with rotation)
+        vertices_3d_world = self.head_mesh.vertices_3d(params_3dmm=params_3dmm, zero_rotation=False)  # [B, N, 3]
+        
+        # Get flame params for scale and translation
+        flame_params = self.head_mesh.flame_params(params_3dmm)
+        scale = torch.clamp(flame_params.scale[:, None] + 1.0, 1e-8)
+        vertices_3d_world = vertices_3d_world * scale
+        translation = flame_params.translation.clone()
+        translation[..., 2] = 0.0
+        vertices_3d_world = vertices_3d_world + translation[:, None, :]
+        
+        # Project to 2D
+        vertices_2d = (vertices_3d_world[..., :2] + 1.0) / 2.0 * self._img_size  # [B, N, 2]
+        
+        # Use face faces for rasterization
+        faces_to_use = self.face_faces if self.face_faces is not None and len(self.face_faces) > 0 else self.mesh_faces
+        
+        # Process batch (for now, process one at a time for simplicity)
+        batch_size = params_3dmm.shape[0]
+        depth_maps = []
+        
+        for b in range(batch_size):
+            # Convert to numpy for rasterization
+            verts_2d_np = vertices_2d[b].detach().cpu().numpy()  # [N, 2]
+            verts_3d_np = vertices_3d_world[b].detach().cpu().numpy()  # [N, 3]
+            
+            # Get depth per vertex (z coordinate)
+            depth_per_vert = verts_3d_np[:, 2].astype(np.float32)
+            
+            # Rasterize using the same logic as dataset
+            depth = np.full((self._img_size, self._img_size), np.inf, dtype=np.float32)
+            valid_vert_mask = np.ones(len(verts_2d_np), dtype=bool)
+            
+            for (i, j, k) in faces_to_use:
+                if i >= len(verts_2d_np) or j >= len(verts_2d_np) or k >= len(verts_2d_np):
+                    continue
+                if not (valid_vert_mask[i] and valid_vert_mask[j] and valid_vert_mask[k]):
+                    continue
+                tri = verts_2d_np[[i, j, k], :]  # [[x,y],[x,y],[x,y]]
+                if not np.all(np.isfinite(tri)):
+                    continue
+                
+                rr, cc = polygon(tri[:, 1], tri[:, 0], shape=(self._img_size, self._img_size))
+                if rr.size == 0:
+                    continue
+                
+                ax, ay = tri[0]; bx, by = tri[1]; cx, cy = tri[2]
+                den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+                if abs(den) < 1e-8:
+                    continue
+                
+                px = cc + 0.5
+                py = rr + 0.5
+                alpha = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / den
+                beta = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / den
+                gamma = 1.0 - alpha - beta
+                
+                z_tri = depth_per_vert[[i, j, k]]
+                z_interp = alpha * z_tri[0] + beta * z_tri[1] + gamma * z_tri[2]
+                
+                cur = depth[rr, cc]
+                closer = z_interp < cur
+                if np.any(closer):
+                    depth[rr[closer], cc[closer]] = z_interp[closer]
+            
+            # Normalize to [0, 1]
+            valid = np.isfinite(depth) & (depth != np.inf)
+            depth01 = np.zeros_like(depth, dtype=np.float32)
+            if np.any(valid):
+                dmin = float(depth[valid].min())
+                dmax = float(depth[valid].max())
+                denom = max(dmax - dmin, 1e-8)
+                depth01[valid] = (depth[valid] - dmin) / denom
+            
+            # Resize to [64, 64] to match GT depth
+            depth01 = cv2.resize(depth01, (64, 64), interpolation=cv2.INTER_LINEAR)
+            depth_maps.append(torch.from_numpy(depth01).unsqueeze(0))  # [1, 64, 64]
+        
+        return torch.stack(depth_maps).to(params_3dmm.device).unsqueeze(1)  # [B, 1, 64, 64]
+
     def _step_fn(self, batch: Dict[str, Any], batch_nb: int, loader_name: str):
         images, targets = self.get_input(batch)
         outputs = self.forward(images)
@@ -344,6 +508,18 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
                 on_epoch=True,
             )
 
+        reprojected_refined_pred = outputs[OUTPUT_2D_VERTICES_REFINED][:, self.flame_indices["face"]]
+        reprojected_refined_gt = targets[TARGET_2D_FULL_LANDMARKS][:, self.flame_indices["face"]]
+        reprojected_refined_metrics = self.metrics_reprojection(
+            reprojected_refined_pred, {"keypoints": reprojected_refined_gt, "bboxes": targets[INPUT_BBOX_KEY]}
+        )
+        for metric_name, metric_value in reprojected_refined_metrics.items():
+            self.log(
+                f"{loader_name}/metrics/{metric_name}",
+                metric_value,
+                on_epoch=True,
+            )
+
         # Use pre-computed 3D vertices from model output
         pred_3d_vertices = outputs[OUTPUT_3D_VERTICES]
         metrics_3d = self.metrics_3d(
@@ -361,6 +537,64 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
                 metric_value,
                 on_epoch=True,
             )
+
+        refined_3d_vertices = outputs[OUTPUT_3D_VERTICES_REFINED]
+        metrics_refined_3d = self.metrics_refined_3d(
+            normalize_to_cube(refined_3d_vertices[:, self.flame_indices["face"]]),
+            {
+                "keypoints": normalize_to_cube(
+                    targets[TARGET_3D_MODEL_VERTICES][:, self.flame_indices["face"]]
+                )
+            },
+        )
+
+        for metric_name, metric_value in metrics_refined_3d.items():
+            self.log(
+                f"{loader_name}/metrics/{metric_name}",
+                metric_value,
+                on_epoch=True,
+            )
+
+        # ========== NEW METRICS: Mesh-to-Depth and Mesh-to-Landmarks ==========
+        if NEW_METRICS_ENABLED:
+            # Mesh-to-Depth: Generate depth from mesh and compare to GT depth
+            if OUTPUT_3DMM_PARAMS in outputs and TARGET_FACE_DEPTH in targets:
+                try:
+                    depth_from_mesh = self._generate_depth_from_mesh(outputs[OUTPUT_3DMM_PARAMS])
+                    # Compare mesh-generated depth to GT depth
+                    mesh_to_depth_iou = self.mesh_to_depth_iou_metric(depth_from_mesh, targets[TARGET_FACE_DEPTH])
+                    self.log(
+                        f"{loader_name}/metrics/mesh_to_depth_iou",
+                        mesh_to_depth_iou,
+                        on_epoch=True,
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not compute mesh-to-depth metric: {e}")
+            
+            # Mesh-to-Landmarks: Extract 68 landmarks from mesh and compare to GT landmarks
+            if OUTPUT_3DMM_PARAMS in outputs and TARGET_2D_LANDMARKS in targets:
+                try:
+                    landmarks_from_mesh = self._extract_68_landmarks_from_mesh(outputs[OUTPUT_3DMM_PARAMS])  # [B, 68, 2]
+                    
+                    # Apply presence mask
+                    presence = targets[TARGET_2D_LANDMARKS_PRESENCE]
+                    landmarks_from_mesh_masked = landmarks_from_mesh * presence[..., None]
+                    targets_2d_masked = targets[TARGET_2D_LANDMARKS] * presence[..., None] * self._img_size
+                    
+                    # Compute metrics
+                    mesh_to_landmarks_metrics_result = self.mesh_to_landmarks_metrics(
+                        landmarks_from_mesh_masked,
+                        {"keypoints": targets_2d_masked, "bboxes": targets[INPUT_BBOX_KEY]}
+                    )
+                    
+                    for metric_name, metric_value in mesh_to_landmarks_metrics_result.items():
+                        self.log(
+                            f"{loader_name}/metrics/{metric_name}",
+                            metric_value,
+                            on_epoch=True,
+                        )
+                except Exception as e:
+                    logger.warning(f"Could not compute mesh-to-landmarks metric: {e}")
 
         # Logging
         self.log(f"{loader_name}/loss", total_loss, prog_bar=True, sync_dist=self.use_ddp)

@@ -45,6 +45,21 @@ class HeadMesh(nn.Module):
             projected_vertices = projected_vertices[..., :2]
         return projected_vertices
 
+    def reprojected_vertices_from_vertices_3d(self, vertices_3d: Tensor, original_params_3dmm: Tensor, to_2d: bool = True) -> Tensor:
+        """
+        Returns [B, N, C].
+        """
+        pred_vertices = vertices_3d
+        flame_params = self.flame_params(params_3dmm=original_params_3dmm)
+        scale = torch.clamp(flame_params.scale[:, None] + 1.0, 1e-8)
+        pred_vertices *= scale  # [B, 1, 1]
+        flame_params.translation[..., 2] = 0.0
+        pred_vertices += flame_params.translation[:, None]  # [B, 1, 3]
+        projected_vertices = (pred_vertices + 1.0) / 2.0 * self._image_size
+        if to_2d:
+            projected_vertices = projected_vertices[..., :2]
+        return projected_vertices
+
     def adjust_3dmm_to_paddings(self, params_3dmm: Tensor, paddings: List[int]) -> Tensor:
         """
         paddings: if you enlarge the image, the paddings should be positive; if you crop it - negative.

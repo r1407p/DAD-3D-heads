@@ -10,6 +10,9 @@ from model_training.data.config import (
     OUTPUT_REGION,
     OUTPUT_3D_VERTICES,
     OUTPUT_2D_VERTICES,
+    OUTPUT_RESIDUAL_DEFORMATION,
+    OUTPUT_3D_VERTICES_REFINED,
+    OUTPUT_2D_VERTICES_REFINED,
 )
 from model_training.model.encoders import get_encoder
 from model_training.model.bifpn import BiFPN
@@ -104,6 +107,33 @@ class ClassificationHead(nn.Module):
         return self.logit_image(f.view(batch_size, -1))
 
 
+class ResidualDeformationHead(nn.Module):
+    def __init__(self, in_dim, num_vertices, hidden_dim=256, scale=0.01):
+        super().__init__()
+        self.num_vertices = num_vertices
+        self.scale = scale
+
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, num_vertices * 3),
+        )
+
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, feat):
+        """
+        feat: (B, C)
+        return: (B, V, 3)
+        """
+        B = feat.shape[0]
+        delta = self.mlp(feat).view(B, self.num_vertices, 3)
+        return delta * self.scale
+
+
 class FlameRegression(nn.Module):
     def __init__(self, model_config: Dict[str, Any], consts_config: Dict[str, Any], num_classes: int = 68):
         super().__init__()
@@ -146,6 +176,19 @@ class FlameRegression(nn.Module):
         for param in self.head_mesh.parameters():
             param.requires_grad = False
 
+        num_vertices = 5023  # FLAME vertex count
+
+        pre_residual_head_in_dim = model_config["num_filters"] + model_config["num_classes"] + 1 + 1 + self.encoder.encoder_channels["layer1"]
+        self.pre_residual_head = nn.Conv2d(pre_residual_head_in_dim, 256, kernel_size=1)
+
+        self.residual_head = ResidualDeformationHead(
+            in_dim=2048,
+            num_vertices=num_vertices,
+            hidden_dim=256,
+            scale=0.01
+        )
+
+
     def forward(self, x):
         encoder_output = []
         for stage in self.encoder.stages[: self.max_layer]:
@@ -169,6 +212,16 @@ class FlameRegression(nn.Module):
         vertices_3d = self.head_mesh.vertices_3d(params_3dmm=params_3dmm, zero_rotation=True)
         vertices_2d = self.head_mesh.reprojected_vertices(params_3dmm=params_3dmm, to_2d=True)
 
+
+        res_feat = F.adaptive_avg_pool2d(fmap, 1).view(B, -1)
+
+        # maps = torch.cat([x, heatmap, depth, region, decoder_output[2]], dim=1)
+        # map = self.pre_residual_head(maps)
+        # res_feat = F.adaptive_avg_pool2d(map, 1).view(B, -1)
+        residual_deformation = self.residual_head(res_feat)
+        vertices_3d_refined = vertices_3d + residual_deformation
+        vertices_2d_refined = self.head_mesh.reprojected_vertices_from_vertices_3d(vertices_3d_refined, params_3dmm, to_2d=True)
+
         return {
             OUTPUT_LANDMARKS_HEATMAP: heatmap,
             OUTPUT_DEPTH: depth,
@@ -177,4 +230,7 @@ class FlameRegression(nn.Module):
             OUTPUT_2D_LANDMARKS: landmarks,
             OUTPUT_3D_VERTICES: vertices_3d,
             OUTPUT_2D_VERTICES: vertices_2d,
+            OUTPUT_RESIDUAL_DEFORMATION: residual_deformation,
+            OUTPUT_3D_VERTICES_REFINED: vertices_3d_refined,
+            OUTPUT_2D_VERTICES_REFINED: vertices_2d_refined,
         }

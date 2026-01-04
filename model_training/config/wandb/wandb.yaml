@@ -1,0 +1,13 @@
+# @package _global_
+wandb:
+  enable: true 
+  project: "dad-3d-heads-refined"
+  entity: ""
+  name: ${experiment.name}
+  group: ""
+  tags: ["flame", "baseline"]
+  mode: "online"
+  save_code: true
+  log_model: true
+  id: ""
+  resume: "allow"

@@ -69,3 +69,32 @@ criterions:
     loss:
       _target_: model_training.losses.SigmoidSmoothL1Masked
       beta: 1.0
+
+  - name: regular_loss
+    target_key: OUTPUT_RESIDUAL_DEFORMATION
+    output_key: OUTPUT_RESIDUAL_DEFORMATION
+    weight: 1.0
+    loss:
+      _target_: model_training.losses.RegularLoss
+
+  - name: vertices3d_refined_loss
+    target_key: TARGET_3D_MODEL_VERTICES
+    output_key: OUTPUT_3D_VERTICES_REFINED  # Now uses pre-computed 3D vertices from model
+    weight: 50.
+    loss:
+      _target_: model_training.losses.Vertices3DLossDirect
+      criterion: l2 # choose from {l1, l2, smooth_l1}
+      weights_and_indices:
+        flame_indices: ${train.flame_indices}
+        weights: {'head': .5, 'face_w_ears': .75, 'face': 1.}
+
+  - name: reprojection_refined_loss
+    target_key: TARGET_2D_FULL_LANDMARKS
+    output_key: OUTPUT_2D_VERTICES_REFINED  # Now uses pre-computed 2D vertices from model
+    weight: 0.05
+    loss:
+      _target_: model_training.losses.ReprojectionLossDirect
+      criterion: smooth_l1
+      weights_and_indices:
+        flame_indices: ${train.flame_indices}
+        weights: {'face': .5, 'face_w_ears': .5}

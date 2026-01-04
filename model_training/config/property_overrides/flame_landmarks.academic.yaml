@@ -1,3 +1,5 @@
 # @package _global_
 experiment:
   name: academic_experiment
+  # name: train_on_depth_and_region_only_fusion_on_depth_and_region_no_supervise_heatmap
+  name: train_on_all_fusion_on_all_deformation_head_all_metrics
