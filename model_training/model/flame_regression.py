@@ -19,6 +19,8 @@ from model_training.model.bifpn import BiFPN
 from model_training.model.layers import IdentityLayer
 from model_training.head_mesh import HeadMesh
 from torch.nn import functional as F
+import os
+import numpy as np
 
 __all__ = ["FlameRegression"]
 
@@ -135,8 +137,9 @@ class ResidualDeformationHead(nn.Module):
 
 
 class FlameRegression(nn.Module):
-    def __init__(self, model_config: Dict[str, Any], consts_config: Dict[str, Any], num_classes: int = 68):
+    def __init__(self, model_config: Dict[str, Any], consts_config: Dict[str, Any], flame_indices_config: Dict[str, Any], num_classes: int = 68, only_face: bool = False):
         super().__init__()
+        self.flame_indices_config = flame_indices_config
         self.encoder = get_encoder(model_config["backbone"], model_config.get("pretrained", False))
         self.bifpn = BiFPN(
             [
@@ -176,7 +179,15 @@ class FlameRegression(nn.Module):
         for param in self.head_mesh.parameters():
             param.requires_grad = False
 
-        num_vertices = 5023  # FLAME vertex count
+        self.flame_indices = {}
+        for key, value in self.flame_indices_config["files"].items():
+            self.flame_indices[key] = np.load(os.path.join(self.flame_indices_config["folder"], value))
+
+        self.only_face = only_face
+        if only_face:
+            num_vertices = len(self.flame_indices['face'])
+        else:
+            num_vertices = 5023  # FLAME vertex count
 
         pre_residual_head_in_dim = model_config["num_filters"] + model_config["num_classes"] + 1 + 1 + self.encoder.encoder_channels["layer1"]
         self.pre_residual_head = nn.Conv2d(pre_residual_head_in_dim, 256, kernel_size=1)
@@ -219,7 +230,13 @@ class FlameRegression(nn.Module):
         # map = self.pre_residual_head(maps)
         # res_feat = F.adaptive_avg_pool2d(map, 1).view(B, -1)
         residual_deformation = self.residual_head(res_feat)
-        vertices_3d_refined = vertices_3d + residual_deformation
+        if self.only_face:
+            padding_residual_deformation = torch.zeros_like(vertices_3d)
+            padding_residual_deformation[:, self.flame_indices['face']] = residual_deformation
+            vertices_3d_refined = vertices_3d + padding_residual_deformation
+        else:
+            vertices_3d_refined = vertices_3d + residual_deformation 
+
         vertices_2d_refined = self.head_mesh.reprojected_vertices_from_vertices_3d(vertices_3d_refined, params_3dmm, to_2d=True)
 
         return {
