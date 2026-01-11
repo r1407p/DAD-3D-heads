@@ -9,6 +9,7 @@ from model_training.train.trainer import DAD3DTrainer
 from model_training.model import load_model
 from model_training.train.flame_lightning_model import FlameLightningModel
 from model_training.data import FlameDataset
+from copy import deepcopy
 
 logger = create_logger(__name__)
 
@@ -18,7 +19,10 @@ torch.autograd.set_detect_anomaly(True)
 def train(config):
     train_dataset = FlameDataset.from_config(config=config["train"])
     val_dataset = FlameDataset.from_config(config=config["val"])
-    model = load_model(config["model"], config["constants"])
+    model_config = deepcopy(config["model"])
+    model_config["flame_indices_config"] = config["train"]["flame_indices"]
+    model = load_model(model_config, config["constants"])
+
     """
     (Pdb) type(model)
 <class 'model_training.model.flame_regression.FlameRegression'>
