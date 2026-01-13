@@ -193,8 +193,9 @@ def visualize_prediction(
     
     # Create dummy train dataset (required by FlameLightningModel)
     train_dataset = FlameDataset.from_config(config=config_all["train"])
-    
+
     # Load model
+    config_all["model"]["flame_indices_config"] =  config_all["train"]["flame_indices"]
     model = load_model(config_all["model"], config_all["constants"])
     
     # Create Lightning model and load checkpoint
@@ -630,7 +631,7 @@ if __name__ == "__main__":
 
 # Examples:
 # Run on whole dataset with metrics and visualizations:
-# python visualize_prediction.py --config experiments/train/2025-12-21-14-35-05/experiment_config.yaml --checkpoint_path experiments/train/2025-12-21-14-35-05/train_on_all_fusion_on_all/checkpoints/epoch_0106-valid_metrics_reproject_nme_2d_1.6748.ckpt --output_dir visualize/predictions --dataset_mode val
+# python visualize_prediction.py --config /home/cytseng/git/DAD-3DHeads/experiments/train/2026-01-13-00-08-06/experiment_config.yaml --checkpoint_path  /home/cytseng/git/DAD-3DHeads/experiments/train/2026-01-13-00-08-06/train_on_all_fusion_deformation_head2_3d_loss/checkpoints/epoch_0088-valid_metrics_reproject_nme_2d_1.6756.ckpt --output_dir visualize/predictions --dataset_mode val
 
 # Run metrics only (faster, no images):
 # python visualize_prediction.py --config experiments/train/2025-12-21-14-35-05/experiment_config.yaml --checkpoint_path experiments/train/2025-12-21-14-35-05/train_on_all_fusion_on_all/checkpoints/epoch_0106-valid_metrics_reproject_nme_2d_1.6748.ckpt --output_dir visualize/predictions --dataset_mode val --no_save_images
