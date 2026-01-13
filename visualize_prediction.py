@@ -36,119 +36,7 @@ from model_training.model.utils import unravel_index, normalize_to_cube
 from model_training.train.utils import any2device
 from model_training.metrics.iou import SoftIoUMetric
 from model_training.metrics.keypoints import FailureRate, KeypointsNME
-
-
-def parse_checkpoint_path_from_argv():
-    """Parse checkpoint_path from sys.argv before Hydra processes it."""
-    checkpoint_path = None
-    args_to_remove = []
-    
-    for i, arg in enumerate(sys.argv):
-        if arg == "--checkpoint_path" and i + 1 < len(sys.argv):
-            checkpoint_path = sys.argv[i + 1]
-            args_to_remove.append(i)
-            args_to_remove.append(i + 1)
-            break
-        elif arg.startswith("--checkpoint_path="):
-            checkpoint_path = arg.split("=", 1)[1]
-            args_to_remove.append(i)
-            break
-        elif arg.startswith("checkpoint_path="):
-            checkpoint_path = arg.split("=", 1)[1]
-            args_to_remove.append(i)
-            break
-    
-    for i in sorted(args_to_remove, reverse=True):
-        sys.argv.pop(i)
-    
-    return checkpoint_path
-
-
-def tensor_to_bgr_uint8(img_tensor: torch.Tensor, normalize_name: str = "imagenet") -> np.ndarray:
-    """Convert tensor image to BGR uint8 numpy array."""
-    img = img_tensor.detach().cpu().numpy().transpose(1, 2, 0)  # HWC, RGB
-    if normalize_name == "imagenet":
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        img = img * std + mean
-        img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
-    elif normalize_name in ("none", None):
-        img = np.clip((img * 255.0) if img.max() <= 1.0 else img, 0, 255).astype(np.uint8)
-    else:
-        mn, mx = float(img.min()), float(img.max())
-        img = (img - mn) / (mx - mn + 1e-8)
-        img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
-    return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
-
-def draw_points(image_bgr: np.ndarray, pts_xy: np.ndarray, color=(0, 0, 255), radius: int = None) -> np.ndarray:
-    """Draw points on image."""
-    out = image_bgr.copy()
-    H, W = out.shape[:2]
-    rr = radius if radius is not None else max(1, int(min(H, W) * 0.005))
-    for (x, y) in pts_xy.astype(int):
-        if 0 <= x < W and 0 <= y < H:
-            cv2.circle(out, (int(x), int(y)), rr, color, -1, lineType=cv2.LINE_AA)
-    return out
-
-
-def overlay_heatmap_on_image(image_bgr: np.ndarray, heatmap: np.ndarray, alpha: float = 0.5) -> np.ndarray:
-    """Overlay heatmap on image."""
-    hm = heatmap.max(axis=0) if heatmap.ndim == 3 else heatmap
-    hm = hm.astype(np.float32)
-    hm -= hm.min()
-    hm = hm / (hm.max() + 1e-8)
-    hm_u8 = (hm * 255.0).astype(np.uint8)
-    H, W = image_bgr.shape[:2]
-    hm_u8 = cv2.resize(hm_u8, (W, H), interpolation=cv2.INTER_LINEAR)
-    hm_color = cv2.applyColorMap(hm_u8, cv2.COLORMAP_JET)
-    return cv2.addWeighted(image_bgr, 1.0, hm_color, alpha, 0)
-
-
-def create_comparison_image(gt_img: np.ndarray, pred_img: np.ndarray, title_gt: str = "Ground Truth", 
-                           title_pred: str = "Prediction", gap: int = 10) -> np.ndarray:
-    """Create side-by-side comparison image."""
-    H, W = gt_img.shape[:2]
-    assert gt_img.shape == pred_img.shape, "Images must have same shape"
-    
-    # Create combined image
-    combined = np.zeros((H, W * 2 + gap, 3), dtype=np.uint8)
-    combined[:, :W] = gt_img
-    combined[:, W + gap:] = pred_img
-    
-    # Add titles
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.6
-    thickness = 2
-    color = (255, 255, 255)
-    
-    (text_width_gt, text_height_gt), _ = cv2.getTextSize(title_gt, font, font_scale, thickness)
-    (text_width_pred, text_height_pred), _ = cv2.getTextSize(title_pred, font, font_scale, thickness)
-    
-    # Draw background for text
-    cv2.rectangle(combined, (5, 5), (text_width_gt + 10, text_height_gt + 15), (0, 0, 0), -1)
-    cv2.rectangle(combined, (W + gap + 5, 5), (W + gap + text_width_pred + 10, text_height_pred + 15), (0, 0, 0), -1)
-    
-    # Draw text
-    cv2.putText(combined, title_gt, (10, text_height_gt + 10), font, font_scale, color, thickness)
-    cv2.putText(combined, title_pred, (W + gap + 10, text_height_pred + 10), font, font_scale, color, thickness)
-    
-    return combined
-
-
-def extract_landmarks_from_output(output: Dict[str, torch.Tensor], img_size: int, stride: int = 4) -> np.ndarray:
-    """Extract landmark coordinates from model output."""
-    if OUTPUT_2D_LANDMARKS in output:
-        landmarks = output[OUTPUT_2D_LANDMARKS].detach().cpu().numpy()[0]  # [N, 2]
-        landmarks = landmarks * img_size  # Denormalize
-    elif OUTPUT_LANDMARKS_HEATMAP in output:
-        pred_heatmap = output[OUTPUT_LANDMARKS_HEATMAP]
-        # Extract landmarks from heatmap
-        landmarks = unravel_index(torch.sigmoid(pred_heatmap).detach()).flip(-1)[0].cpu().numpy()  # [N, 2]
-        landmarks = landmarks * stride  # Scale by stride
-    else:
-        return np.array([])
-    return landmarks.astype(np.float32)
+from visualizer import Visualizer
 
 
 def visualize_prediction(
@@ -349,7 +237,7 @@ def visualize_prediction(
             os.makedirs(item_dir, exist_ok=True)
             
             # Convert to numpy for visualization
-            img_bgr = tensor_to_bgr_uint8(item[INPUT_IMAGE_KEY], normalize_name=norm_name)
+            img_bgr = Visualizer.tensor_to_bgr_uint8(item[INPUT_IMAGE_KEY], normalize_name=norm_name)
             H_vis, W_vis = img_bgr.shape[:2]
             
             # ========== Ground Truth Visualizations ==========
@@ -361,12 +249,12 @@ def visualize_prediction(
                 lm_gt_pix_vis = lm_gt_pix[presence_np]
             else:
                 lm_gt_pix_vis = lm_gt_pix
-            img_gt_kp = draw_points(img_bgr, lm_gt_pix_vis, color=(0, 0, 255))
+            img_gt_kp = Visualizer.draw_points(img_bgr, lm_gt_pix_vis, color=(0, 0, 255))
             
             # GT Heatmap
             if TARGET_LANDMARKS_HEATMAP in item:
                 hm_gt = item[TARGET_LANDMARKS_HEATMAP]
-                img_gt_hm = overlay_heatmap_on_image(img_bgr, hm_gt, alpha=0.5)
+                img_gt_hm = Visualizer.overlay_heatmap_on_image(img_bgr, hm_gt, alpha=0.5)
             else:
                 img_gt_hm = img_bgr.copy()
             
@@ -378,7 +266,7 @@ def visualize_prediction(
                     verts2d_gt_face = verts2d_gt[flame_indices["face"]]
                 else:
                     verts2d_gt_face = verts2d_gt
-                img_gt_proj = draw_points(img_bgr, verts2d_gt_face, color=(0, 255, 0), radius=1)
+                img_gt_proj = Visualizer.draw_points(img_bgr, verts2d_gt_face, color=(0, 255, 0), radius=1)
             else:
                 img_gt_proj = img_bgr.copy()
             
@@ -412,16 +300,16 @@ def visualize_prediction(
             
             # ========== Prediction Visualizations ==========
             # Pred Landmarks
-            lm_pred = extract_landmarks_from_output(output, img_size, stride)
+            lm_pred = Visualizer.extract_landmarks_from_output(output, img_size, stride)
             if len(lm_pred) > 0:
-                img_pred_kp = draw_points(img_bgr, lm_pred, color=(255, 0, 0))
+                img_pred_kp = Visualizer.draw_points(img_bgr, lm_pred, color=(255, 0, 0))
             else:
                 img_pred_kp = img_bgr.copy()
             
             # Pred Heatmap
             if OUTPUT_LANDMARKS_HEATMAP in output:
                 hm_pred = torch.sigmoid(output[OUTPUT_LANDMARKS_HEATMAP]).detach().cpu().numpy()[0]  # [N, H, W]
-                img_pred_hm = overlay_heatmap_on_image(img_bgr, hm_pred, alpha=0.5)
+                img_pred_hm = Visualizer.overlay_heatmap_on_image(img_bgr, hm_pred, alpha=0.5)
             else:
                 img_pred_hm = img_bgr.copy()
             
@@ -457,16 +345,16 @@ def visualize_prediction(
                     verts2d_pred_face = verts2d_pred[flame_indices["face"]]
                 else:
                     verts2d_pred_face = verts2d_pred
-                img_pred_proj = draw_points(img_bgr, verts2d_pred_face.astype(np.float32), color=(255, 0, 0), radius=1)
+                img_pred_proj = Visualizer.draw_points(img_bgr, verts2d_pred_face.astype(np.float32), color=(255, 0, 0), radius=1)
             else:
                 img_pred_proj = img_bgr.copy()
             
             # ========== Create Comparison Images ==========
-            comp_landmarks = create_comparison_image(img_gt_kp, img_pred_kp, "GT Landmarks", "Pred Landmarks")
-            comp_heatmap = create_comparison_image(img_gt_hm, img_pred_hm, "GT Heatmap", "Pred Heatmap")
-            comp_depth = create_comparison_image(img_gt_depth_overlay, img_pred_depth_overlay, "GT Depth", "Pred Depth")
-            comp_region = create_comparison_image(img_gt_region_overlay, img_pred_region_overlay, "GT Region", "Pred Region")
-            comp_projected = create_comparison_image(img_gt_proj, img_pred_proj, "GT Reprojected", "Pred Reprojected")
+            comp_landmarks = Visualizer.create_comparison_image(img_gt_kp, img_pred_kp, "GT Landmarks", "Pred Landmarks")
+            comp_heatmap = Visualizer.create_comparison_image(img_gt_hm, img_pred_hm, "GT Heatmap", "Pred Heatmap")
+            comp_depth = Visualizer.create_comparison_image(img_gt_depth_overlay, img_pred_depth_overlay, "GT Depth", "Pred Depth")
+            comp_region = Visualizer.create_comparison_image(img_gt_region_overlay, img_pred_region_overlay, "GT Region", "Pred Region")
+            comp_projected = Visualizer.create_comparison_image(img_gt_proj, img_pred_proj, "GT Reprojected", "Pred Reprojected")
             
             # ========== Save Images ==========
             cv2.imwrite(os.path.join(item_dir, "input.png"), img_bgr)
