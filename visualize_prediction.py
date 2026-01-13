@@ -31,12 +31,48 @@ from model_training.data.config import (
     OUTPUT_2D_VERTICES,
     OUTPUT_DEPTH,
     OUTPUT_REGION,
+    OUTPUT_RESIDUAL_DEFORMATION,
+    OUTPUT_3D_VERTICES_REFINED,
+    OUTPUT_2D_VERTICES_REFINED,
 )
 from model_training.model.utils import unravel_index, normalize_to_cube
 from model_training.train.utils import any2device
 from model_training.metrics.iou import SoftIoUMetric
 from model_training.metrics.keypoints import FailureRate, KeypointsNME
 from visualizer import Visualizer
+
+
+def create_metrics(device: str):
+    metrics = {
+        "heatmap_iou": SoftIoUMetric(compute_on_step=False).to(device),
+        "region_iou": SoftIoUMetric(compute_on_step=False).to(device),
+        "metrics_2d": MetricCollection({
+            "fr_2d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
+            "fr_2d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
+            "nme_2d": KeypointsNME(compute_on_step=False),
+        }).to(device),
+        "metrics_reprojection": MetricCollection({
+            "reproject_fr_2d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
+            "reproject_fr_2d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
+            "reproject_nme_2d": KeypointsNME(compute_on_step=False),
+        }).to(device),
+        "metrics_3d": MetricCollection({
+            "fr_3d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
+            "fr_3d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
+            "nme_3d": KeypointsNME(compute_on_step=False),
+        }).to(device),
+        "refined_metrics_reprojection": MetricCollection({
+            "refined_reproject_fr_2d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
+            "refined_reproject_fr_2d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
+            "refined_reproject_nme_2d": KeypointsNME(compute_on_step=False),
+        }).to(device),
+        "refined_metrics_3d": MetricCollection({
+            "refined_fr_3d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
+            "refined_fr_3d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
+            "refined_nme_3d": KeypointsNME(compute_on_step=False),
+        }).to(device),
+    }
+    return metrics
 
 
 def visualize_prediction(
@@ -106,29 +142,14 @@ def visualize_prediction(
     stride = dataset_cfg.get("stride", 4)
     
     # ========== Initialize Metrics (same as FlameLightningModel) ==========
-    # Heatmap IoU metric
-    heatmap_iou_metric = SoftIoUMetric(compute_on_step=False).to(device)
-    
-    # Region IoU metric (for face region mask)
-    region_iou_metric = SoftIoUMetric(compute_on_step=False).to(device)
-    
-    metrics_2d = MetricCollection({
-        "fr_2d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
-        "fr_2d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
-        "nme_2d": KeypointsNME(compute_on_step=False),
-    }).to(device)
-    
-    metrics_reprojection = MetricCollection({
-        "reproject_fr_2d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
-        "reproject_fr_2d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
-        "reproject_nme_2d": KeypointsNME(compute_on_step=False),
-    }).to(device)
-    
-    metrics_3d = MetricCollection({
-        "fr_3d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
-        "fr_3d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
-        "nme_3d": KeypointsNME(compute_on_step=False),
-    }).to(device)
+    metrics = create_metrics(device)
+    heatmap_iou_metric = metrics["heatmap_iou"]
+    region_iou_metric = metrics["region_iou"]
+    metrics_2d = metrics["metrics_2d"]
+    metrics_reprojection = metrics["metrics_reprojection"]
+    metrics_3d = metrics["metrics_3d"]
+    refined_metrics_reprojection = metrics["refined_metrics_reprojection"]
+    refined_metrics_3d = metrics["refined_metrics_3d"]
     
     # Load FLAME indices
     flame_indices = {}
@@ -228,6 +249,21 @@ def visualize_prediction(
             pred_3d_vertices = output[OUTPUT_3D_VERTICES]
             metrics_3d(
                 normalize_to_cube(pred_3d_vertices[:, flame_indices["face"]]),
+                {"keypoints": normalize_to_cube(targets[TARGET_3D_MODEL_VERTICES][:, flame_indices["face"]])}
+            )
+        
+        if OUTPUT_2D_VERTICES_REFINED in output and TARGET_2D_FULL_LANDMARKS in targets:
+            reprojected_refined_pred = output[OUTPUT_2D_VERTICES_REFINED][:, flame_indices["face"]]
+            reprojected_refined_gt = targets[TARGET_2D_FULL_LANDMARKS][:, flame_indices["face"]]
+            refined_metrics_reprojection(
+                reprojected_refined_pred,
+                {"keypoints": reprojected_refined_gt, "bboxes": targets[INPUT_BBOX_KEY]}
+            )
+        
+        if OUTPUT_3D_VERTICES_REFINED in output and TARGET_3D_MODEL_VERTICES in targets:
+            pred_3d_vertices_refined = output[OUTPUT_3D_VERTICES_REFINED]
+            refined_metrics_3d(
+                normalize_to_cube(pred_3d_vertices_refined[:, flame_indices["face"]]),
                 {"keypoints": normalize_to_cube(targets[TARGET_3D_MODEL_VERTICES][:, flame_indices["face"]])}
             )
         
@@ -458,7 +494,27 @@ def visualize_prediction(
             logger.info(f"  {name}: {val:.6f}")
     except Exception as e:
         logger.warning(f"Could not compute 3D metrics: {e}")
-    
+
+    # Refined Reprojection metrics
+    try:
+        refined_metrics_reproj_result = refined_metrics_reprojection.compute()
+        for name, value in refined_metrics_reproj_result.items():
+            val = value.item()
+            all_metrics[f"metrics/{name}"] = val
+            logger.info(f"  {name}: {val:.6f}")
+    except Exception as e:
+        logger.warning(f"Could not compute refined reprojection metrics: {e}")
+
+    # Refined 3D metrics
+    try:
+        refined_metrics_3d_result = refined_metrics_3d.compute()
+        for name, value in refined_metrics_3d_result.items():
+            val = value.item()
+            all_metrics[f"metrics/{name}"] = val
+            logger.info(f"  {name}: {val:.6f}")
+    except Exception as e:
+        logger.warning(f"Could not compute refined 3D metrics: {e}")
+
     logger.info("=" * 80)
     
     # Save metrics to file
