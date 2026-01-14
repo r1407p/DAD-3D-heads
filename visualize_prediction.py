@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
 from tqdm import tqdm
-
+import logging
 from model_training.data import FlameDataset
 from model_training.data.config import (
     IMAGE_FILENAME_KEY,
@@ -40,6 +40,11 @@ from model_training.train.utils import any2device
 from model_training.metrics.iou import SoftIoUMetric
 from model_training.metrics.keypoints import FailureRate, KeypointsNME
 from visualizer import Visualizer
+
+def get_keypoints_2d(outputs: Dict[str, torch.Tensor], img_size: int, stride: int) -> torch.Tensor:
+    if OUTPUT_2D_LANDMARKS in outputs.keys():
+        return outputs[OUTPUT_2D_LANDMARKS] * img_size
+    return float(stride) * unravel_index(outputs[OUTPUT_LANDMARKS_HEATMAP]).flip(-1)
 
 
 def create_metrics(device: str):
@@ -74,6 +79,191 @@ def create_metrics(device: str):
     }
     return metrics
 
+
+class MetricTracker:
+    def __init__(self, device: str, flame_indices: Dict[str, np.ndarray], img_size: int, stride: int, logger: logging.Logger):
+        self.device = device
+        self.metrics = create_metrics(device)
+        self.loss_accum = {}
+        self.loss_counts = {}
+        self.flame_indices = flame_indices
+        self.img_size = img_size
+        self.stride = stride
+        self.logger = logger
+    
+    def update_losses(self, loss_dict, total_loss):
+        for k, v in {**loss_dict, "total_loss": total_loss}.items():
+            self.loss_accum[k] = self.loss_accum.get(k, 0.0) + v.item()
+            self.loss_counts[k] = self.loss_counts.get(k, 0) + 1
+
+    def compute_metrics(self, output: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]):
+        if OUTPUT_LANDMARKS_HEATMAP in output and TARGET_LANDMARKS_HEATMAP in targets:
+            self.metrics["heatmap_iou"](
+                output[OUTPUT_LANDMARKS_HEATMAP].sigmoid(),
+                targets[TARGET_LANDMARKS_HEATMAP]
+            )
+        
+        # Region IoU metric
+        if OUTPUT_REGION in output and TARGET_FACE_REGION in targets:
+            self.metrics["region_iou"](
+                output[OUTPUT_REGION].sigmoid(),
+                targets[TARGET_FACE_REGION]
+            )
+        
+        # 2D Landmarks metrics
+        process_2d_branch = OUTPUT_2D_LANDMARKS in output or OUTPUT_LANDMARKS_HEATMAP in output
+        if process_2d_branch and TARGET_2D_LANDMARKS in targets:
+            presence = targets[TARGET_2D_LANDMARKS_PRESENCE]
+            outputs_2d = get_keypoints_2d(output, self.img_size, self.stride) * presence[..., None]
+            targets_2d = targets[TARGET_2D_LANDMARKS] * presence[..., None] * self.img_size
+            self.metrics["metrics_2d"](outputs_2d, {"keypoints": targets_2d, "bboxes": targets[INPUT_BBOX_KEY]})
+        
+        # Reprojection metrics (3D mesh projected to 2D) - use pre-computed vertices
+        if OUTPUT_2D_VERTICES in output and TARGET_2D_FULL_LANDMARKS in targets:
+            reprojected_pred = output[OUTPUT_2D_VERTICES][:, self.flame_indices["face"]]
+            reprojected_gt = targets[TARGET_2D_FULL_LANDMARKS][:, self.flame_indices["face"]]
+            self.metrics["metrics_reprojection"](
+                reprojected_pred,
+                {"keypoints": reprojected_gt, "bboxes": targets[INPUT_BBOX_KEY]}
+            )
+        
+        # 3D vertices metrics - use pre-computed vertices
+        if OUTPUT_3D_VERTICES in output and TARGET_3D_MODEL_VERTICES in targets:
+            pred_3d_vertices = output[OUTPUT_3D_VERTICES]
+            self.metrics["metrics_3d"](
+                normalize_to_cube(pred_3d_vertices[:, self.flame_indices["face"]]),
+                {"keypoints": normalize_to_cube(targets[TARGET_3D_MODEL_VERTICES][:, self.flame_indices["face"]])}
+            )
+        
+        if OUTPUT_2D_VERTICES_REFINED in output and TARGET_2D_FULL_LANDMARKS in targets:
+            reprojected_refined_pred = output[OUTPUT_2D_VERTICES_REFINED][:, self.flame_indices["face"]]
+            reprojected_refined_gt = targets[TARGET_2D_FULL_LANDMARKS][:, self.flame_indices["face"]]
+            self.metrics["refined_metrics_reprojection"](
+                reprojected_refined_pred,
+                {"keypoints": reprojected_refined_gt, "bboxes": targets[INPUT_BBOX_KEY]}
+            )
+        
+        if OUTPUT_3D_VERTICES_REFINED in output and TARGET_3D_MODEL_VERTICES in targets:
+            pred_3d_vertices_refined = output[OUTPUT_3D_VERTICES_REFINED]
+            self.metrics["refined_metrics_3d"](
+                normalize_to_cube(pred_3d_vertices_refined[:, self.flame_indices["face"]]),
+                {"keypoints": normalize_to_cube(targets[TARGET_3D_MODEL_VERTICES][:, self.flame_indices["face"]])}
+            )
+
+    def summarize_metrics(self, output_dir: str, dataset_mode: str, checkpoint_path: str, num_items: int):
+            # ========== Compute and Print Final Metrics ==========
+        self.logger.info("\n" + "=" * 80)
+        self.logger.info("EVALUATION RESULTS")
+        self.logger.info("=" * 80)
+        
+        all_metrics = {}
+        
+        # ========== Losses (same format as test.py) ==========
+        self.logger.info("\nLosses:")
+        self.logger.info("-" * 40)
+        for loss_name in sorted(self.loss_accum.keys()):
+            avg_loss = self.loss_accum[loss_name] / self.loss_counts[loss_name]
+            all_metrics[f"loss/{loss_name}"] = avg_loss
+            self.logger.info(f"  {loss_name}: {avg_loss:.6f}")
+        
+        # ========== Metrics ==========
+        self.logger.info("\nMetrics:")
+        self.logger.info("-" * 40)
+        
+        # Heatmap IoU metric
+        try:
+            heatmap_iou = self.metrics["heatmap_iou"].compute().item()
+            all_metrics["metrics/heatmap_iou"] = heatmap_iou
+            self.logger.info(f"  heatmap_iou: {heatmap_iou:.6f}")
+        except Exception as e:
+            self.logger.warning(f"Could not compute heatmap IoU: {e}")
+        
+        # Region IoU metric
+        try:
+            region_iou = self.metrics["region_iou"].compute().item()
+            all_metrics["metrics/region_iou"] = region_iou
+            self.logger.info(f"  region_iou: {region_iou:.6f}")
+        except Exception as e:
+            self.logger.warning(f"Could not compute region IoU: {e}")
+        
+        # 2D Landmarks metrics
+        try:
+            metrics_2d_result = self.metrics["metrics_2d"].compute()
+            for name, value in metrics_2d_result.items():
+                val = value.item()
+                all_metrics[f"metrics/{name}"] = val
+                self.logger.info(f"  {name}: {val:.6f}")
+        except Exception as e:
+            self.logger.warning(f"Could not compute 2D metrics: {e}")
+        
+        # Reprojection metrics
+        try:
+            metrics_reproj_result = self.metrics["metrics_reprojection"].compute()
+            for name, value in metrics_reproj_result.items():
+                val = value.item()
+                all_metrics[f"metrics/{name}"] = val
+                self.logger.info(f"  {name}: {val:.6f}")
+        except Exception as e:
+            self.logger.warning(f"Could not compute reprojection metrics: {e}")
+        
+        # 3D metrics
+        try:
+            metrics_3d_result = self.metrics["metrics_3d"].compute()
+            for name, value in metrics_3d_result.items():
+                val = value.item()
+                all_metrics[f"metrics/{name}"] = val
+                self.logger.info(f"  {name}: {val:.6f}")
+        except Exception as e:
+            self.logger.warning(f"Could not compute 3D metrics: {e}")
+
+        # Refined Reprojection metrics
+        try:
+            refined_metrics_reproj_result = self.metrics["refined_metrics_reprojection"].compute()
+            for name, value in refined_metrics_reproj_result.items():
+                val = value.item()
+                all_metrics[f"metrics/{name}"] = val
+                self.logger.info(f"  {name}: {val:.6f}")
+        except Exception as e:
+            self.logger.warning(f"Could not compute refined reprojection metrics: {e}")
+
+        # Refined 3D metrics
+        try:
+            refined_metrics_3d_result = self.metrics["refined_metrics_3d"].compute()
+            for name, value in refined_metrics_3d_result.items():
+                val = value.item()
+                all_metrics[f"metrics/{name}"] = val
+                self.logger.info(f"  {name}: {val:.6f}")
+        except Exception as e:
+            self.logger.warning(f"Could not compute refined 3D metrics: {e}")
+
+        self.logger.info("=" * 80)
+        
+        # Save metrics to file
+        metrics_file = os.path.join(output_dir, "metrics.json")
+        with open(metrics_file, "w") as f:
+            json.dump(all_metrics, f, indent=2)
+        self.logger.info(f"Metrics saved to {metrics_file}")
+        
+        # Also save a summary text file (similar to test.py output format)
+        summary_file = os.path.join(output_dir, "metrics_summary.txt")
+        with open(summary_file, "w") as f:
+            f.write("=" * 80 + "\n")
+            f.write("EVALUATION RESULTS\n")
+            f.write("=" * 80 + "\n")
+            f.write(f"Dataset: {dataset_mode}\n")
+            f.write(f"Checkpoint: {checkpoint_path}\n")
+            f.write(f"Num samples: {num_items}\n")
+            f.write("=" * 80 + "\n\n")
+            
+            # Format like test.py output
+            f.write("-" * 80 + "\n")
+            f.write(f"{'Metric':<45} {'Value':>20}\n")
+            f.write("-" * 80 + "\n")
+            for name, value in sorted(all_metrics.items()):
+                f.write(f"{name:<45} {value:>20.6f}\n")
+            f.write("-" * 80 + "\n")
+        self.logger.info(f"Summary saved to {summary_file}")
+        return all_metrics
 
 def visualize_prediction(
     config_path: str,
@@ -142,32 +332,14 @@ def visualize_prediction(
     stride = dataset_cfg.get("stride", 4)
     
     # ========== Initialize Metrics (same as FlameLightningModel) ==========
-    metrics = create_metrics(device)
-    heatmap_iou_metric = metrics["heatmap_iou"]
-    region_iou_metric = metrics["region_iou"]
-    metrics_2d = metrics["metrics_2d"]
-    metrics_reprojection = metrics["metrics_reprojection"]
-    metrics_3d = metrics["metrics_3d"]
-    refined_metrics_reprojection = metrics["refined_metrics_reprojection"]
-    refined_metrics_3d = metrics["refined_metrics_3d"]
-    
     # Load FLAME indices
     flame_indices = {}
     for key, value in config_all["train"]["flame_indices"]["files"].items():
         flame_indices[key] = np.load(os.path.join(config_all["train"]["flame_indices"]["folder"], value))
     
     visualizer = Visualizer(output_dir, dataset, flame_indices, norm_name, img_size, stride)
-    
-    # ========== Initialize Loss Accumulators ==========
-    loss_accumulators = {}
-    loss_counts = {}
-    
-    # Helper to get 2D keypoints from outputs
-    def get_keypoints_2d(outputs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        if OUTPUT_2D_LANDMARKS in outputs.keys():
-            return outputs[OUTPUT_2D_LANDMARKS] * img_size
-        return float(stride) * unravel_index(outputs[OUTPUT_LANDMARKS_HEATMAP]).flip(-1)
-    
+    metric_tracker = MetricTracker(device, flame_indices, img_size, stride, logger)
+
     # Process each item
     num_items = len(dataset) if max_items is None else min(max_items, len(dataset))
     
@@ -198,193 +370,13 @@ def visualize_prediction(
         # ========== Compute Losses (same as test.py) ==========
         with torch.no_grad():
             total_loss, loss_dict = dad3d_net.criterion(output, targets, epoch=999)
-            
-            # Accumulate losses
-            for loss_name, loss_value in loss_dict.items():
-                if loss_name not in loss_accumulators:
-                    loss_accumulators[loss_name] = 0.0
-                    loss_counts[loss_name] = 0
-                loss_accumulators[loss_name] += loss_value.item()
-                loss_counts[loss_name] += 1
-            
-            # Also accumulate total loss
-            if "total_loss" not in loss_accumulators:
-                loss_accumulators["total_loss"] = 0.0
-                loss_counts["total_loss"] = 0
-            loss_accumulators["total_loss"] += total_loss.item()
-            loss_counts["total_loss"] += 1
-        
-        # ========== Compute Metrics ==========
-        # Heatmap IoU metric
-        if OUTPUT_LANDMARKS_HEATMAP in output and TARGET_LANDMARKS_HEATMAP in targets:
-            heatmap_iou_metric(
-                output[OUTPUT_LANDMARKS_HEATMAP].sigmoid(),
-                targets[TARGET_LANDMARKS_HEATMAP]
-            )
-        
-        # Region IoU metric
-        if OUTPUT_REGION in output and TARGET_FACE_REGION in targets:
-            region_iou_metric(
-                output[OUTPUT_REGION].sigmoid(),
-                targets[TARGET_FACE_REGION]
-            )
-        
-        # 2D Landmarks metrics
-        process_2d_branch = OUTPUT_2D_LANDMARKS in output or OUTPUT_LANDMARKS_HEATMAP in output
-        if process_2d_branch and TARGET_2D_LANDMARKS in targets:
-            presence = targets[TARGET_2D_LANDMARKS_PRESENCE]
-            outputs_2d = get_keypoints_2d(output) * presence[..., None]
-            targets_2d = targets[TARGET_2D_LANDMARKS] * presence[..., None] * img_size
-            metrics_2d(outputs_2d, {"keypoints": targets_2d, "bboxes": targets[INPUT_BBOX_KEY]})
-        
-        # Reprojection metrics (3D mesh projected to 2D) - use pre-computed vertices
-        if OUTPUT_2D_VERTICES in output and TARGET_2D_FULL_LANDMARKS in targets:
-            reprojected_pred = output[OUTPUT_2D_VERTICES][:, flame_indices["face"]]
-            reprojected_gt = targets[TARGET_2D_FULL_LANDMARKS][:, flame_indices["face"]]
-            metrics_reprojection(
-                reprojected_pred,
-                {"keypoints": reprojected_gt, "bboxes": targets[INPUT_BBOX_KEY]}
-            )
-        
-        # 3D vertices metrics - use pre-computed vertices
-        if OUTPUT_3D_VERTICES in output and TARGET_3D_MODEL_VERTICES in targets:
-            pred_3d_vertices = output[OUTPUT_3D_VERTICES]
-            metrics_3d(
-                normalize_to_cube(pred_3d_vertices[:, flame_indices["face"]]),
-                {"keypoints": normalize_to_cube(targets[TARGET_3D_MODEL_VERTICES][:, flame_indices["face"]])}
-            )
-        
-        if OUTPUT_2D_VERTICES_REFINED in output and TARGET_2D_FULL_LANDMARKS in targets:
-            reprojected_refined_pred = output[OUTPUT_2D_VERTICES_REFINED][:, flame_indices["face"]]
-            reprojected_refined_gt = targets[TARGET_2D_FULL_LANDMARKS][:, flame_indices["face"]]
-            refined_metrics_reprojection(
-                reprojected_refined_pred,
-                {"keypoints": reprojected_refined_gt, "bboxes": targets[INPUT_BBOX_KEY]}
-            )
-        
-        if OUTPUT_3D_VERTICES_REFINED in output and TARGET_3D_MODEL_VERTICES in targets:
-            pred_3d_vertices_refined = output[OUTPUT_3D_VERTICES_REFINED]
-            refined_metrics_3d(
-                normalize_to_cube(pred_3d_vertices_refined[:, flame_indices["face"]]),
-                {"keypoints": normalize_to_cube(targets[TARGET_3D_MODEL_VERTICES][:, flame_indices["face"]])}
-            )
-        
+            metric_tracker.update_losses(loss_dict, total_loss)
         # ========== Save Visualizations (if enabled) ==========
         if save_images:
             visualizer.visualize_prediction(idx, item, ann, output)
-    # ========== Compute and Print Final Metrics ==========
-    logger.info("\n" + "=" * 80)
-    logger.info("EVALUATION RESULTS")
-    logger.info("=" * 80)
-    
-    all_metrics = {}
-    
-    # ========== Losses (same format as test.py) ==========
-    logger.info("\nLosses:")
-    logger.info("-" * 40)
-    for loss_name in sorted(loss_accumulators.keys()):
-        avg_loss = loss_accumulators[loss_name] / loss_counts[loss_name]
-        all_metrics[f"loss/{loss_name}"] = avg_loss
-        logger.info(f"  {loss_name}: {avg_loss:.6f}")
-    
-    # ========== Metrics ==========
-    logger.info("\nMetrics:")
-    logger.info("-" * 40)
-    
-    # Heatmap IoU metric
-    try:
-        heatmap_iou = heatmap_iou_metric.compute().item()
-        all_metrics["metrics/heatmap_iou"] = heatmap_iou
-        logger.info(f"  heatmap_iou: {heatmap_iou:.6f}")
-    except Exception as e:
-        logger.warning(f"Could not compute heatmap IoU: {e}")
-    
-    # Region IoU metric
-    try:
-        region_iou = region_iou_metric.compute().item()
-        all_metrics["metrics/region_iou"] = region_iou
-        logger.info(f"  region_iou: {region_iou:.6f}")
-    except Exception as e:
-        logger.warning(f"Could not compute region IoU: {e}")
-    
-    # 2D Landmarks metrics
-    try:
-        metrics_2d_result = metrics_2d.compute()
-        for name, value in metrics_2d_result.items():
-            val = value.item()
-            all_metrics[f"metrics/{name}"] = val
-            logger.info(f"  {name}: {val:.6f}")
-    except Exception as e:
-        logger.warning(f"Could not compute 2D metrics: {e}")
-    
-    # Reprojection metrics
-    try:
-        metrics_reproj_result = metrics_reprojection.compute()
-        for name, value in metrics_reproj_result.items():
-            val = value.item()
-            all_metrics[f"metrics/{name}"] = val
-            logger.info(f"  {name}: {val:.6f}")
-    except Exception as e:
-        logger.warning(f"Could not compute reprojection metrics: {e}")
-    
-    # 3D metrics
-    try:
-        metrics_3d_result = metrics_3d.compute()
-        for name, value in metrics_3d_result.items():
-            val = value.item()
-            all_metrics[f"metrics/{name}"] = val
-            logger.info(f"  {name}: {val:.6f}")
-    except Exception as e:
-        logger.warning(f"Could not compute 3D metrics: {e}")
 
-    # Refined Reprojection metrics
-    try:
-        refined_metrics_reproj_result = refined_metrics_reprojection.compute()
-        for name, value in refined_metrics_reproj_result.items():
-            val = value.item()
-            all_metrics[f"metrics/{name}"] = val
-            logger.info(f"  {name}: {val:.6f}")
-    except Exception as e:
-        logger.warning(f"Could not compute refined reprojection metrics: {e}")
+    all_metrics = metric_tracker.compute_metrics()
 
-    # Refined 3D metrics
-    try:
-        refined_metrics_3d_result = refined_metrics_3d.compute()
-        for name, value in refined_metrics_3d_result.items():
-            val = value.item()
-            all_metrics[f"metrics/{name}"] = val
-            logger.info(f"  {name}: {val:.6f}")
-    except Exception as e:
-        logger.warning(f"Could not compute refined 3D metrics: {e}")
-
-    logger.info("=" * 80)
-    
-    # Save metrics to file
-    metrics_file = os.path.join(output_dir, "metrics.json")
-    with open(metrics_file, "w") as f:
-        json.dump(all_metrics, f, indent=2)
-    logger.info(f"Metrics saved to {metrics_file}")
-    
-    # Also save a summary text file (similar to test.py output format)
-    summary_file = os.path.join(output_dir, "metrics_summary.txt")
-    with open(summary_file, "w") as f:
-        f.write("=" * 80 + "\n")
-        f.write("EVALUATION RESULTS\n")
-        f.write("=" * 80 + "\n")
-        f.write(f"Dataset: {dataset_mode}\n")
-        f.write(f"Checkpoint: {checkpoint_path}\n")
-        f.write(f"Num samples: {num_items}\n")
-        f.write("=" * 80 + "\n\n")
-        
-        # Format like test.py output
-        f.write("-" * 80 + "\n")
-        f.write(f"{'Metric':<45} {'Value':>20}\n")
-        f.write("-" * 80 + "\n")
-        for name, value in sorted(all_metrics.items()):
-            f.write(f"{name:<45} {value:>20.6f}\n")
-        f.write("-" * 80 + "\n")
-    logger.info(f"Summary saved to {summary_file}")
-    
     return all_metrics
 
 
