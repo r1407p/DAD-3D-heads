@@ -156,6 +156,8 @@ def visualize_prediction(
     for key, value in config_all["train"]["flame_indices"]["files"].items():
         flame_indices[key] = np.load(os.path.join(config_all["train"]["flame_indices"]["folder"], value))
     
+    visualizer = Visualizer(output_dir, dataset, flame_indices, norm_name, img_size, stride)
+    
     # ========== Initialize Loss Accumulators ==========
     loss_accumulators = {}
     loss_counts = {}
@@ -269,167 +271,7 @@ def visualize_prediction(
         
         # ========== Save Visualizations (if enabled) ==========
         if save_images:
-            item_dir = os.path.join(output_dir, str(idx))
-            os.makedirs(item_dir, exist_ok=True)
-            
-            # Convert to numpy for visualization
-            img_bgr = Visualizer.tensor_to_bgr_uint8(item[INPUT_IMAGE_KEY], normalize_name=norm_name)
-            H_vis, W_vis = img_bgr.shape[:2]
-            
-            # ========== Ground Truth Visualizations ==========
-            # GT Landmarks
-            lm_gt_norm = item[TARGET_2D_LANDMARKS]
-            lm_gt_pix = (lm_gt_norm * img_size).astype(np.float32)
-            if TARGET_2D_LANDMARKS_PRESENCE in item:
-                presence_np = item[TARGET_2D_LANDMARKS_PRESENCE].astype(bool)
-                lm_gt_pix_vis = lm_gt_pix[presence_np]
-            else:
-                lm_gt_pix_vis = lm_gt_pix
-            img_gt_kp = Visualizer.draw_points(img_bgr, lm_gt_pix_vis, color=(0, 0, 255))
-            
-            # GT Heatmap
-            if TARGET_LANDMARKS_HEATMAP in item:
-                hm_gt = item[TARGET_LANDMARKS_HEATMAP]
-                img_gt_hm = Visualizer.overlay_heatmap_on_image(img_bgr, hm_gt, alpha=0.5)
-            else:
-                img_gt_hm = img_bgr.copy()
-            
-            # GT Full landmarks (projected vertices) - used for reproject_nme_2d metric
-            if TARGET_2D_FULL_LANDMARKS in item:
-                verts2d_gt = item[TARGET_2D_FULL_LANDMARKS].astype(np.float32)
-                # Use face subset if available (same as metrics)
-                if "face" in flame_indices:
-                    verts2d_gt_face = verts2d_gt[flame_indices["face"]]
-                else:
-                    verts2d_gt_face = verts2d_gt
-                img_gt_proj = Visualizer.draw_points(img_bgr, verts2d_gt_face, color=(0, 255, 0), radius=1)
-            else:
-                img_gt_proj = img_bgr.copy()
-            
-            # GT Depth
-            if TARGET_FACE_DEPTH in item:
-                depth_gt = item[TARGET_FACE_DEPTH]
-                if isinstance(depth_gt, torch.Tensor):
-                    depth_gt = depth_gt.detach().cpu().numpy()
-                depth_gt = depth_gt.squeeze().astype(np.float32)
-                depth_gt_u8 = (np.clip(depth_gt, 0, 1) * 255.0).astype(np.uint8)
-                depth_gt_u8 = cv2.resize(depth_gt_u8, (W_vis, H_vis), interpolation=cv2.INTER_LINEAR)
-                depth_gt_color = cv2.applyColorMap(depth_gt_u8, cv2.COLORMAP_JET)
-                img_gt_depth_overlay = cv2.addWeighted(img_bgr, 1.0, depth_gt_color, 0.6, 0)
-            else:
-                depth_gt_color = np.zeros_like(img_bgr)
-                img_gt_depth_overlay = img_bgr.copy()
-            
-            # GT Region
-            if TARGET_FACE_REGION in item:
-                region_gt = item[TARGET_FACE_REGION]
-                if isinstance(region_gt, torch.Tensor):
-                    region_gt = region_gt.detach().cpu().numpy()
-                region_gt = region_gt.squeeze().astype(np.float32)
-                region_gt_u8 = (np.clip(region_gt, 0, 1) * 255.0).astype(np.uint8)
-                region_gt_u8 = cv2.resize(region_gt_u8, (W_vis, H_vis), interpolation=cv2.INTER_NEAREST)
-                region_gt_color = cv2.applyColorMap(region_gt_u8, cv2.COLORMAP_BONE)
-                img_gt_region_overlay = cv2.addWeighted(img_bgr, 1.0, region_gt_color, 0.5, 0)
-            else:
-                region_gt_color = np.zeros_like(img_bgr)
-                img_gt_region_overlay = img_bgr.copy()
-            
-            # ========== Prediction Visualizations ==========
-            # Pred Landmarks
-            lm_pred = Visualizer.extract_landmarks_from_output(output, img_size, stride)
-            if len(lm_pred) > 0:
-                img_pred_kp = Visualizer.draw_points(img_bgr, lm_pred, color=(255, 0, 0))
-            else:
-                img_pred_kp = img_bgr.copy()
-            
-            # Pred Heatmap
-            if OUTPUT_LANDMARKS_HEATMAP in output:
-                hm_pred = torch.sigmoid(output[OUTPUT_LANDMARKS_HEATMAP]).detach().cpu().numpy()[0]  # [N, H, W]
-                img_pred_hm = Visualizer.overlay_heatmap_on_image(img_bgr, hm_pred, alpha=0.5)
-            else:
-                img_pred_hm = img_bgr.copy()
-            
-            # Pred Depth
-            if OUTPUT_DEPTH in output:
-                depth_pred = torch.sigmoid(output[OUTPUT_DEPTH]).detach().cpu().numpy()[0, 0]  # [H, W]
-                depth_pred = np.clip(depth_pred, 0, 1)
-                depth_pred_u8 = (depth_pred * 255.0).astype(np.uint8)
-                depth_pred_u8 = cv2.resize(depth_pred_u8, (W_vis, H_vis), interpolation=cv2.INTER_LINEAR)
-                depth_pred_color = cv2.applyColorMap(depth_pred_u8, cv2.COLORMAP_JET)
-                img_pred_depth_overlay = cv2.addWeighted(img_bgr, 1.0, depth_pred_color, 0.6, 0)
-            else:
-                depth_pred_color = np.zeros_like(img_bgr)
-                img_pred_depth_overlay = img_bgr.copy()
-            
-            # Pred Region
-            if OUTPUT_REGION in output:
-                region_pred = output[OUTPUT_REGION].detach().cpu().numpy()[0, 0]  # [H, W]
-                region_pred = np.clip(region_pred, 0, 1)
-                region_pred_u8 = (region_pred * 255.0).astype(np.uint8)
-                region_pred_u8 = cv2.resize(region_pred_u8, (W_vis, H_vis), interpolation=cv2.INTER_NEAREST)
-                region_pred_color = cv2.applyColorMap(region_pred_u8, cv2.COLORMAP_BONE)
-                img_pred_region_overlay = cv2.addWeighted(img_bgr, 1.0, region_pred_color, 0.5, 0)
-            else:
-                region_pred_color = np.zeros_like(img_bgr)
-                img_pred_region_overlay = img_bgr.copy()
-            
-            # Pred Reprojected Vertices (OUTPUT_2D_VERTICES) - used for reproject_nme_2d metric
-            if OUTPUT_2D_VERTICES in output:
-                verts2d_pred = output[OUTPUT_2D_VERTICES].detach().cpu().numpy()[0]  # [N, 2]
-                # Use face subset if available (same as metrics)
-                if "face" in flame_indices:
-                    verts2d_pred_face = verts2d_pred[flame_indices["face"]]
-                else:
-                    verts2d_pred_face = verts2d_pred
-                img_pred_proj = Visualizer.draw_points(img_bgr, verts2d_pred_face.astype(np.float32), color=(255, 0, 0), radius=1)
-            else:
-                img_pred_proj = img_bgr.copy()
-            
-            # ========== Create Comparison Images ==========
-            comp_landmarks = Visualizer.create_comparison_image(img_gt_kp, img_pred_kp, "GT Landmarks", "Pred Landmarks")
-            comp_heatmap = Visualizer.create_comparison_image(img_gt_hm, img_pred_hm, "GT Heatmap", "Pred Heatmap")
-            comp_depth = Visualizer.create_comparison_image(img_gt_depth_overlay, img_pred_depth_overlay, "GT Depth", "Pred Depth")
-            comp_region = Visualizer.create_comparison_image(img_gt_region_overlay, img_pred_region_overlay, "GT Region", "Pred Region")
-            comp_projected = Visualizer.create_comparison_image(img_gt_proj, img_pred_proj, "GT Reprojected", "Pred Reprojected")
-            
-            # ========== Save Images ==========
-            cv2.imwrite(os.path.join(item_dir, "input.png"), img_bgr)
-            cv2.imwrite(os.path.join(item_dir, "comparison_landmarks.png"), comp_landmarks)
-            cv2.imwrite(os.path.join(item_dir, "comparison_heatmap.png"), comp_heatmap)
-            cv2.imwrite(os.path.join(item_dir, "comparison_depth.png"), comp_depth)
-            cv2.imwrite(os.path.join(item_dir, "comparison_region.png"), comp_region)
-            cv2.imwrite(os.path.join(item_dir, "comparison_projected.png"), comp_projected)
-            
-            # Save individual images
-            cv2.imwrite(os.path.join(item_dir, "gt_landmarks.png"), img_gt_kp)
-            cv2.imwrite(os.path.join(item_dir, "pred_landmarks.png"), img_pred_kp)
-            cv2.imwrite(os.path.join(item_dir, "gt_heatmap.png"), img_gt_hm)
-            cv2.imwrite(os.path.join(item_dir, "pred_heatmap.png"), img_pred_hm)
-            cv2.imwrite(os.path.join(item_dir, "gt_depth.png"), depth_gt_color)
-            cv2.imwrite(os.path.join(item_dir, "pred_depth.png"), depth_pred_color)
-            cv2.imwrite(os.path.join(item_dir, "gt_region.png"), region_gt_color)
-            cv2.imwrite(os.path.join(item_dir, "pred_region.png"), region_pred_color)
-            cv2.imwrite(os.path.join(item_dir, "gt_reprojected.png"), img_gt_proj)
-            cv2.imwrite(os.path.join(item_dir, "pred_reprojected.png"), img_pred_proj)
-            
-            # Save metadata
-            x, y, w, h = item[INPUT_BBOX_KEY]
-            meta = {
-                "index": int(item[SAMPLE_INDEX_KEY]),
-                "img_path": ann["img_path"],
-                "bbox_xywh": [int(x), int(y), int(w), int(h)],
-                "image_size_input": [int(H_vis), int(W_vis)],
-                "num_landmarks_gt": int(lm_gt_norm.shape[0]),
-                "num_landmarks_pred": int(len(lm_pred)),
-            }
-            with open(os.path.join(item_dir, "data.json"), "w") as f:
-                json.dump(meta, f, indent=2)
-            
-            # Save original image if available
-            orig = cv2.imread(os.path.join(dataset.config["dataset_root"], ann["img_path"]))
-            if orig is not None:
-                cv2.imwrite(os.path.join(item_dir, "original.png"), orig)
-    
+            visualizer.visualize_prediction(idx, item, ann, output)
     # ========== Compute and Print Final Metrics ==========
     logger.info("\n" + "=" * 80)
     logger.info("EVALUATION RESULTS")
@@ -552,7 +394,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize model predictions and compute metrics")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config YAML file")
     parser.add_argument("--checkpoint_path", type=str, required=True, help="Path to model checkpoint")
-    parser.add_argument("--output_dir", type=str, default="visualize/predictions", help="Output directory")
+    parser.add_argument("--output_dir", type=str, default="visualize/predictions_refactored", help="Output directory")
     parser.add_argument("--dataset_mode", type=str, default="val", choices=["train", "val", "test"],
                        help="Dataset mode to use")
     parser.add_argument("--max_items", type=int, default=None, help="Maximum number of items (None = all)")
