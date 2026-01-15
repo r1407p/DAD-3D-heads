@@ -46,50 +46,50 @@ def get_keypoints_2d(outputs: Dict[str, torch.Tensor], img_size: int, stride: in
         return outputs[OUTPUT_2D_LANDMARKS] * img_size
     return float(stride) * unravel_index(outputs[OUTPUT_LANDMARKS_HEATMAP]).flip(-1)
 
-
-def create_metrics(device: str):
-    metrics = {
-        "heatmap_iou": SoftIoUMetric(compute_on_step=False).to(device),
-        "region_iou": SoftIoUMetric(compute_on_step=False).to(device),
-        "metrics_2d": MetricCollection({
-            "fr_2d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
-            "fr_2d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
-            "nme_2d": KeypointsNME(compute_on_step=False),
-        }).to(device),
-        "metrics_reprojection": MetricCollection({
-            "reproject_fr_2d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
-            "reproject_fr_2d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
-            "reproject_nme_2d": KeypointsNME(compute_on_step=False),
-        }).to(device),
-        "metrics_3d": MetricCollection({
-            "fr_3d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
-            "fr_3d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
-            "nme_3d": KeypointsNME(compute_on_step=False),
-        }).to(device),
-        "refined_metrics_reprojection": MetricCollection({
-            "refined_reproject_fr_2d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
-            "refined_reproject_fr_2d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
-            "refined_reproject_nme_2d": KeypointsNME(compute_on_step=False),
-        }).to(device),
-        "refined_metrics_3d": MetricCollection({
-            "refined_fr_3d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
-            "refined_fr_3d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
-            "refined_nme_3d": KeypointsNME(compute_on_step=False),
-        }).to(device),
-    }
-    return metrics
-
-
 class MetricTracker:
     def __init__(self, device: str, flame_indices: Dict[str, np.ndarray], img_size: int, stride: int, logger: logging.Logger):
         self.device = device
-        self.metrics = create_metrics(device)
+        self.metrics = MetricTracker.create_metrics(device)
         self.loss_accum = {}
         self.loss_counts = {}
         self.flame_indices = flame_indices
         self.img_size = img_size
         self.stride = stride
         self.logger = logger
+
+    @staticmethod
+    def create_metrics(device: str) -> Dict[str, Any]:
+        metrics = {
+            "heatmap_iou": SoftIoUMetric(compute_on_step=False).to(device),
+            "region_iou": SoftIoUMetric(compute_on_step=False).to(device),
+            "metrics_2d": MetricCollection({
+                "fr_2d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
+                "fr_2d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
+                "nme_2d": KeypointsNME(compute_on_step=False),
+            }).to(device),
+            "metrics_reprojection": MetricCollection({
+                "reproject_fr_2d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
+                "reproject_fr_2d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
+                "reproject_nme_2d": KeypointsNME(compute_on_step=False),
+            }).to(device),
+            "metrics_3d": MetricCollection({
+                "fr_3d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
+                "fr_3d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
+                "nme_3d": KeypointsNME(compute_on_step=False),
+            }).to(device),
+            "refined_metrics_reprojection": MetricCollection({
+                "refined_reproject_fr_2d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
+                "refined_reproject_fr_2d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
+                "refined_reproject_nme_2d": KeypointsNME(compute_on_step=False),
+            }).to(device),
+            "refined_metrics_3d": MetricCollection({
+                "refined_fr_3d_005": FailureRate(compute_on_step=False, threshold=0.05, below=True),
+                "refined_fr_3d_01": FailureRate(compute_on_step=False, threshold=0.1, below=True),
+                "refined_nme_3d": KeypointsNME(compute_on_step=False),
+            }).to(device),
+        }
+        return metrics
+
     
     def update_losses(self, loss_dict, total_loss):
         for k, v in {**loss_dict, "total_loss": total_loss}.items():
@@ -371,11 +371,12 @@ def visualize_prediction(
         with torch.no_grad():
             total_loss, loss_dict = dad3d_net.criterion(output, targets, epoch=999)
             metric_tracker.update_losses(loss_dict, total_loss)
+            metric_tracker.compute_metrics(output, targets)
         # ========== Save Visualizations (if enabled) ==========
         if save_images:
             visualizer.visualize_prediction(idx, item, ann, output)
 
-    all_metrics = metric_tracker.compute_metrics()
+    all_metrics = metric_tracker.summarize_metrics(output_dir, dataset_mode, checkpoint_path, num_items)
 
     return all_metrics
 
