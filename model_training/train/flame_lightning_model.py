@@ -508,17 +508,18 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
                 on_epoch=True,
             )
 
-        reprojected_refined_pred = outputs[OUTPUT_2D_VERTICES_REFINED][:, self.flame_indices["face"]]
-        reprojected_refined_gt = targets[TARGET_2D_FULL_LANDMARKS][:, self.flame_indices["face"]]
-        reprojected_refined_metrics = self.metrics_reprojection(
-            reprojected_refined_pred, {"keypoints": reprojected_refined_gt, "bboxes": targets[INPUT_BBOX_KEY]}
-        )
-        for metric_name, metric_value in reprojected_refined_metrics.items():
-            self.log(
-                f"{loader_name}/metrics/{metric_name}",
-                metric_value,
-                on_epoch=True,
+        if OUTPUT_2D_VERTICES_REFINED in outputs:
+            reprojected_refined_pred = outputs[OUTPUT_2D_VERTICES_REFINED][:, self.flame_indices["face"]]
+            reprojected_refined_gt = targets[TARGET_2D_FULL_LANDMARKS][:, self.flame_indices["face"]]
+            reprojected_refined_metrics = self.metrics_refined_reprojection(
+                reprojected_refined_pred, {"keypoints": reprojected_refined_gt, "bboxes": targets[INPUT_BBOX_KEY]}
             )
+            for metric_name, metric_value in reprojected_refined_metrics.items():
+                self.log(
+                    f"{loader_name}/metrics/{metric_name}",
+                    metric_value,
+                    on_epoch=True,
+                )
 
         # Use pre-computed 3D vertices from model output
         pred_3d_vertices = outputs[OUTPUT_3D_VERTICES]
@@ -538,22 +539,23 @@ class FlameLightningModel(pl.LightningModule, KeypointsDataMixin, KeypointsVisua
                 on_epoch=True,
             )
 
-        refined_3d_vertices = outputs[OUTPUT_3D_VERTICES_REFINED]
-        metrics_refined_3d = self.metrics_refined_3d(
-            normalize_to_cube(refined_3d_vertices[:, self.flame_indices["face"]]),
-            {
-                "keypoints": normalize_to_cube(
-                    targets[TARGET_3D_MODEL_VERTICES][:, self.flame_indices["face"]]
-                )
-            },
-        )
-
-        for metric_name, metric_value in metrics_refined_3d.items():
-            self.log(
-                f"{loader_name}/metrics/{metric_name}",
-                metric_value,
-                on_epoch=True,
+        if OUTPUT_3D_VERTICES_REFINED in outputs:
+            refined_3d_vertices = outputs[OUTPUT_3D_VERTICES_REFINED]
+            metrics_refined_3d = self.metrics_refined_3d(
+                normalize_to_cube(refined_3d_vertices[:, self.flame_indices["face"]]),
+                {
+                    "keypoints": normalize_to_cube(
+                        targets[TARGET_3D_MODEL_VERTICES][:, self.flame_indices["face"]]
+                    )
+                },
             )
+
+            for metric_name, metric_value in metrics_refined_3d.items():
+                self.log(
+                    f"{loader_name}/metrics/{metric_name}",
+                    metric_value,
+                    on_epoch=True,
+                )
 
         # ========== NEW METRICS: Mesh-to-Depth and Mesh-to-Landmarks ==========
         if NEW_METRICS_ENABLED:

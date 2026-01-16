@@ -228,6 +228,10 @@ class FLAMELayer(nn.Module):
             vertices = vertices[..., 0]
         return vertices
 
+    def to_rot(self, vertices: torch.Tensor, flame_params: FlameParams) -> torch.Tensor:
+        rotation_mat = rot_mat_from_6dof(flame_params.rotation).type(vertices.dtype)
+        vertices_rotated = torch.matmul(rotation_mat.unsqueeze(1), vertices.unsqueeze(-1))
+        return vertices_rotated[..., 0]
 
 def uint8_to_float32(x: torch.Tensor) -> torch.Tensor:
     if x.dtype == torch.uint8:

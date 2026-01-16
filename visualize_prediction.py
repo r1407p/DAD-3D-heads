@@ -40,6 +40,155 @@ from model_training.train.utils import any2device
 from model_training.metrics.iou import SoftIoUMetric
 from model_training.metrics.keypoints import FailureRate, KeypointsNME
 from visualizer import Visualizer
+import numpy as np
+from typing import Optional
+faces = torch.load('model_training/model/static/flame_mesh_faces.pt').numpy()
+import random
+
+def set_seed(seed: int = 42):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    np.random.seed(seed)
+    random.seed(seed)
+    return seed
+
+set_seed(42)
+def compute_vertex_visibility(
+    vertices_3d: np.ndarray,
+    faces: np.ndarray,
+    camera_position: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """
+    Compute visibility mask for 3D vertices based on backface culling.
+    
+    A vertex is considered visible if at least one of its adjacent faces
+    is front-facing (normal pointing towards the camera).
+    
+    Args:
+        vertices_3d: 3D vertex positions, shape (N, 3)
+        faces: Triangle face indices, shape (F, 3)
+        camera_position: Camera position in 3D space. If None, assumes 
+                        orthographic projection with camera looking along -Z axis
+                        (camera at [0, 0, +inf])
+    
+    Returns:
+        visibility: Boolean array of shape (N,), True if vertex is visible
+    """
+    vertices_3d = np.asarray(vertices_3d, dtype=np.float32)
+    faces = np.asarray(faces, dtype=np.int64)
+    
+    num_vertices = vertices_3d.shape[0]
+    num_faces = faces.shape[0]
+    
+    # Get vertices for each face
+    v0 = vertices_3d[faces[:, 0]]  # (F, 3)
+    v1 = vertices_3d[faces[:, 1]]  # (F, 3)
+    v2 = vertices_3d[faces[:, 2]]  # (F, 3)
+    
+    # Compute face normals using cross product
+    edge1 = v1 - v0
+    edge2 = v2 - v0
+    face_normals = np.cross(edge1, edge2)  # (F, 3)
+    
+    # Normalize face normals
+    norms = np.linalg.norm(face_normals, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-8)  # Avoid division by zero
+    face_normals = face_normals / norms
+    
+    # Compute face centers
+    face_centers = (v0 + v1 + v2) / 3.0  # (F, 3)
+    
+    # Compute view direction for each face
+    if camera_position is None:
+        # Orthographic projection: camera looking along -Z axis
+        view_directions = np.array([[0.0, 0.0, 1.0]], dtype=np.float32)
+        view_directions = np.broadcast_to(view_directions, (num_faces, 3))
+    else:
+        camera_position = np.asarray(camera_position, dtype=np.float32)
+        view_directions = camera_position - face_centers
+        view_norms = np.linalg.norm(view_directions, axis=1, keepdims=True)
+        view_norms = np.maximum(view_norms, 1e-8)
+        view_directions = view_directions / view_norms
+    
+    # Face is visible if normal points towards camera (positive dot product)
+    dot_products = np.sum(face_normals * view_directions, axis=1)  # (F,)
+    face_visible = dot_products > 0  # (F,)
+    
+    # A vertex is visible if at least one of its adjacent faces is visible
+    vertex_visible = np.zeros(num_vertices, dtype=bool)
+    
+    # For each visible face, mark its vertices as visible
+    visible_face_indices = np.where(face_visible)[0]
+    for face_idx in visible_face_indices:
+        vertex_visible[faces[face_idx]] = True
+    
+    return vertex_visible
+
+def compute_vertex_visibility(
+    vertices_3d: np.ndarray,
+    faces: np.ndarray,
+    camera_position: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """
+    Compute visibility mask for 3D vertices based on back-face culling.
+
+    A vertex is considered visible if at least one of its adjacent faces
+    is front-facing (normal pointing towards the camera).
+
+    Args:
+        vertices_3d: (N, 3) array of vertex positions
+        faces: (F, 3) array of triangle indices
+        camera_position:
+            - None: assume orthographic camera looking along -Z
+                    (view direction = [0, 0, -1])
+            - (3,): camera position in world coordinates (perspective)
+
+    Returns:
+        visibility: (N,) boolean array
+    """
+    vertices_3d = np.asarray(vertices_3d)
+    faces = np.asarray(faces)
+
+    N = vertices_3d.shape[0]
+    F = faces.shape[0]
+
+    # --- Compute face normals ---
+    v0 = vertices_3d[faces[:, 0]]
+    v1 = vertices_3d[faces[:, 1]]
+    v2 = vertices_3d[faces[:, 2]]
+
+    face_normals = np.cross(v1 - v0, v2 - v0)  # (F, 3)
+
+    # Avoid zero-area faces
+    norm = np.linalg.norm(face_normals, axis=1, keepdims=True)
+    valid = norm.squeeze() > 1e-8
+    face_normals[valid] /= norm[valid]
+
+    # --- Compute view direction ---
+    if camera_position is None:
+        # Orthographic: camera looking towards -Z
+        view_dirs = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+        view_dirs = np.tile(view_dirs[None, :], (F, 1))
+    else:
+        camera_position = np.asarray(camera_position).reshape(1, 3)
+        face_centers = (v0 + v1 + v2) / 3.0
+        view_dirs = camera_position - face_centers
+        view_dirs /= np.linalg.norm(view_dirs, axis=1, keepdims=True)
+
+    # --- Front-facing test ---
+    # Face is visible if normal points toward camera
+    facing = np.sum(face_normals * view_dirs, axis=1) > 0.0
+
+    # --- Accumulate vertex visibility ---
+    visibility = np.zeros(N, dtype=bool)
+
+    visible_faces = faces[facing]
+    visibility[visible_faces.reshape(-1)] = True
+
+    return visibility
+
 
 def get_keypoints_2d(outputs: Dict[str, torch.Tensor], img_size: int, stride: int) -> torch.Tensor:
     if OUTPUT_2D_LANDMARKS in outputs.keys():
@@ -372,9 +521,15 @@ def visualize_prediction(
             total_loss, loss_dict = dad3d_net.criterion(output, targets, epoch=999)
             metric_tracker.update_losses(loss_dict, total_loss)
             metric_tracker.compute_metrics(output, targets)
+        
+        # Compute vertex visibility for visualization
+        flame_params = dad3d_net.model.head_mesh.flame_params(output[OUTPUT_3DMM_PARAMS])
+        rotated_vertices = dad3d_net.model.head_mesh.flame.to_rot(output[OUTPUT_3D_VERTICES], flame_params)
+        visible_vertices = compute_vertex_visibility(rotated_vertices.cpu().numpy()[0], faces)
+
         # ========== Save Visualizations (if enabled) ==========
         if save_images:
-            visualizer.visualize_prediction(idx, item, ann, output)
+            visualizer.visualize_prediction(idx, item, ann, output, visible_mask=visible_vertices)
 
     all_metrics = metric_tracker.summarize_metrics(output_dir, dataset_mode, checkpoint_path, num_items)
 

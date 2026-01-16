@@ -71,6 +71,27 @@ class Visualizer:
         return out
 
     @staticmethod
+    def draw_points_with_visibility(
+        image_bgr: np.ndarray, 
+        pts_xy: np.ndarray, 
+        visible_mask: np.ndarray,
+        color_visible=(0, 255, 0),      # Green for visible
+        color_occluded=(0, 0, 255),     # Red for occluded
+        radius: int = None
+    ) -> np.ndarray:
+        """Draw points on image with different colors for visible/occluded vertices."""
+        out = image_bgr.copy()
+        H, W = out.shape[:2]
+        rr = radius if radius is not None else max(1, int(min(H, W) * 0.005))
+        
+        pts_int = pts_xy.astype(int)
+        for i, (x, y) in enumerate(pts_int):
+            if 0 <= x < W and 0 <= y < H:
+                color = color_visible if visible_mask[i] else color_occluded
+                cv2.circle(out, (int(x), int(y)), rr, color, -1, lineType=cv2.LINE_AA)
+        return out
+
+    @staticmethod
     def overlay_heatmap_on_image(image_bgr: np.ndarray, heatmap: np.ndarray, alpha: float = 0.5) -> np.ndarray:
         """Overlay heatmap on image."""
         hm = heatmap.max(axis=0) if heatmap.ndim == 3 else heatmap
@@ -129,7 +150,7 @@ class Visualizer:
             return np.array([])
         return landmarks.astype(np.float32)
 
-    def visualize_prediction(self, idx: int, item: Dict[str, Any], ann: Dict[str, Any], output: Dict[str, torch.Tensor]):
+    def visualize_prediction(self, idx: int, item: Dict[str, Any], ann: Dict[str, Any], output: Dict[str, torch.Tensor], visible_mask: np.ndarray = None):
        
         item_dir = os.path.join(self.output_dir, str(idx))
         os.makedirs(item_dir, exist_ok=True)
@@ -240,10 +261,29 @@ class Visualizer:
             verts2d_pred = output[OUTPUT_2D_VERTICES].detach().cpu().numpy()[0]  # [N, 2]
             # Use face subset if available (same as metrics)
             if "face" in self.flame_indices:
-                verts2d_pred_face = verts2d_pred[self.flame_indices["face"]]
+                face_indices = self.flame_indices["face"]
+                verts2d_pred_face = verts2d_pred[face_indices]
+                # Also subset the visibility mask if provided
+                if visible_mask is not None:
+                    visible_mask_face = visible_mask[face_indices]
+                else:
+                    visible_mask_face = None
             else:
                 verts2d_pred_face = verts2d_pred
-            img_pred_proj = Visualizer.draw_points(img_bgr, verts2d_pred_face.astype(np.float32), color=(255, 0, 0), radius=1)
+                visible_mask_face = visible_mask
+            
+            # Draw with visibility coloring if mask is provided
+            if visible_mask_face is not None:
+                img_pred_proj = Visualizer.draw_points_with_visibility(
+                    img_bgr, 
+                    verts2d_pred_face.astype(np.float32), 
+                    visible_mask_face,
+                    color_visible=(0, 255, 0),    # Green for visible
+                    color_occluded=(0, 0, 255),   # Red for occluded
+                    radius=1
+                )
+            else:
+                img_pred_proj = Visualizer.draw_points(img_bgr, verts2d_pred_face.astype(np.float32), color=(255, 0, 0), radius=1)
         else:
             img_pred_proj = img_bgr.copy()
         
