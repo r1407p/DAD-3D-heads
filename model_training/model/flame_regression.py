@@ -194,19 +194,21 @@ class FlameRegression(nn.Module):
             num_vertices = 5023  # FLAME vertex count
             self.refined_indices = np.arange(5023)
         self.num_vertices = num_vertices
-        
-
-        pre_residual_head_in_dim = model_config["num_filters"] + model_config["num_classes"] + 1 + 1 + self.encoder.encoder_channels["layer1"]
-        self.pre_residual_head = nn.Conv2d(pre_residual_head_in_dim, 256, kernel_size=1)
+        self.flame_faces = torch.load('model_training/model/static/flame_mesh_faces.pt')
 
         self.deformation_type = "MLP"  # "SLPT" or "None"
 
-        self.residual_head = ResidualDeformationHead(
-            in_dim=2048,
-            num_vertices=num_vertices,
-            hidden_dim=256,
-            scale=0.01
-        )
+        if self.deformation_type == "MLP":
+            pre_residual_head_in_dim = model_config["num_filters"] + model_config["num_classes"] + 1 + 1 + self.encoder.encoder_channels["layer1"]
+            self.pre_residual_head = nn.Conv2d(pre_residual_head_in_dim, 256, kernel_size=1)
+            self.residual_head = ResidualDeformationHead(
+                in_dim=2048,
+                num_vertices=num_vertices,
+                hidden_dim=256,
+                scale=0.01
+            )
+        elif self.deformation_type == "SLPT":
+            pass
 
     def compute_vertex_visibility_torch(
         self,
@@ -336,4 +338,5 @@ class FlameRegression(nn.Module):
             OUTPUT_RESIDUAL_DEFORMATION: residual_deformation,
             OUTPUT_3D_VERTICES_REFINED: vertices_3d_refined,
             OUTPUT_2D_VERTICES_REFINED: vertices_2d_refined,
+            # 'OUTPUT_VISIBLE_VERTICES': visible_vertices,
         }
