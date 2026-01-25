@@ -199,6 +199,8 @@ class FlameRegression(nn.Module):
         pre_residual_head_in_dim = model_config["num_filters"] + model_config["num_classes"] + 1 + 1 + self.encoder.encoder_channels["layer1"]
         self.pre_residual_head = nn.Conv2d(pre_residual_head_in_dim, 256, kernel_size=1)
 
+        self.deformation_type = "MLP"  # "SLPT" or "None"
+
         self.residual_head = ResidualDeformationHead(
             in_dim=2048,
             num_vertices=num_vertices,
@@ -305,19 +307,21 @@ class FlameRegression(nn.Module):
         vertices_3d = self.head_mesh.vertices_3d(params_3dmm=params_3dmm, zero_rotation=True)
         vertices_2d = self.head_mesh.reprojected_vertices(params_3dmm=params_3dmm, to_2d=True)
 
+        rotated_vertices_3d = self.head_mesh.flame.to_rot(vertices_3d, self.head_mesh.flame_params(params_3dmm))
+        visible_vertices = self.compute_vertex_visibility_torch(rotated_vertices_3d, None)
 
-        res_feat = F.adaptive_avg_pool2d(fmap, 1).view(B, -1)
-
-        # maps = torch.cat([x, heatmap, depth, region, decoder_output[2]], dim=1)
-        # map = self.pre_residual_head(maps)
-        # res_feat = F.adaptive_avg_pool2d(map, 1).view(B, -1)
-        residual_deformation = self.residual_head(res_feat)
-        if self.only_face:
-            padding_residual_deformation = torch.zeros_like(vertices_3d)
-            padding_residual_deformation[:, self.flame_indices['face']] = residual_deformation
-            vertices_3d_refined = vertices_3d + padding_residual_deformation
-        else:
-            vertices_3d_refined = vertices_3d + residual_deformation 
+        vertices_3d_refined = vertices_3d.clone()
+        if self.deformation_type == "MLP":
+            res_feat = F.adaptive_avg_pool2d(fmap, 1).view(B, -1)
+            residual_deformation = self.residual_head(res_feat)
+            vertices_3d_refined[:, self.refined_indices] = (
+                vertices_3d_refined[:, self.refined_indices] + residual_deformation
+            )
+            pass
+        elif self.deformation_type == "SLPT":
+            pass
+        elif self.deformation_type == "None":
+            pass
 
         vertices_2d_refined = self.head_mesh.reprojected_vertices_from_vertices_3d(vertices_3d_refined, params_3dmm, to_2d=True)
 
