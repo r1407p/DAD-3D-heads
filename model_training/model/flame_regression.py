@@ -21,6 +21,7 @@ from model_training.head_mesh import HeadMesh
 from torch.nn import functional as F
 import os
 import numpy as np
+from typing import Optional
 
 __all__ = ["FlameRegression"]
 
@@ -199,6 +200,81 @@ class FlameRegression(nn.Module):
             scale=0.01
         )
 
+    def compute_vertex_visibility_torch(
+        self,
+        vertices_3d: torch.Tensor,
+        camera_position: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Batched back-face culling vertex visibility (PyTorch).
+
+        Args:
+            vertices_3d: (B, N, 3)
+            faces: (F, 3) long tensor
+            camera_position:
+                - None: orthographic camera looking along -Z
+                - (3,) or (B, 3): perspective camera position
+
+        Returns:
+            visibility: (B, N) bool tensor
+        """
+        assert vertices_3d.dim() == 3 and vertices_3d.size(-1) == 3
+        assert self.flame_faces.dim() == 2 and self.flame_faces.size(1) == 3
+
+        B, N, _ = vertices_3d.shape
+        F = self.flame_faces.shape[0]
+
+        # --- Gather face vertices ---
+        v0 = vertices_3d[:, self.flame_faces[:, 0]]  # (B, F, 3)
+        v1 = vertices_3d[:, self.flame_faces[:, 1]]
+        v2 = vertices_3d[:, self.flame_faces[:, 2]]
+        # --- Face normals ---
+        face_normals = torch.cross(v1 - v0, v2 - v0, dim=-1)  # (B, F, 3)
+        norm = torch.linalg.norm(face_normals, dim=-1, keepdim=True)  # (B, F, 1)
+
+        valid = norm > 1e-8
+        face_normals = torch.where(
+            valid,
+            face_normals / (norm + 1e-8),
+            torch.zeros_like(face_normals)
+        )
+
+        # --- View direction ---
+        if camera_position is None:
+            # Orthographic: constant view direction
+            view_dirs = torch.tensor(
+                [0.0, 0.0, -1.0],
+                dtype=vertices_3d.dtype
+            ).view(1, 1, 3).expand(B, F, 3).to(vertices_3d.device)
+        else:
+            if camera_position.dim() == 1:
+                camera_position = camera_position.view(1, 1, 3).expand(B, F, 3).to(vertices_3d.device)
+            elif camera_position.dim() == 2:
+                camera_position = camera_position.view(B, 1, 3).expand(B, F, 3).to(vertices_3d.device)
+            else:
+                raise ValueError("camera_position must be (3,) or (B, 3)")
+
+            face_centers = (v0 + v1 + v2) / 3.0
+            view_dirs = camera_position - face_centers
+            view_dirs = view_dirs / (torch.linalg.norm(view_dirs, dim=-1, keepdim=True) + 1e-8)
+        # --- Front-facing test ---
+        facing = (face_normals * view_dirs).sum(dim=-1) > 0  # (B, F)
+
+        # --- Accumulate vertex visibility ---
+        visibility = torch.zeros(B, N, dtype=torch.bool)
+
+        # faces: (F, 3) → broadcast to (B, F, 3)
+        faces_expand = self.flame_faces.unsqueeze(0).expand(B, -1, -1)
+
+        # Mark vertices belonging to any visible face
+        visibility = torch.zeros(B, N, dtype=torch.bool, device=vertices_3d.device)
+
+        for b in range(B):
+            visible_faces = self.flame_faces[facing[b]]        # (F_visible, 3)
+            visible_vertices = visible_faces.reshape(-1)
+            visibility[b, visible_vertices] = True
+
+        return visibility
 
     def forward(self, x):
         encoder_output = []
