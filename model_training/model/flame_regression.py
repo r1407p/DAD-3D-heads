@@ -139,6 +139,53 @@ class ResidualDeformationHead(nn.Module):
         return delta * self.scale
 
 
+class SLPTDeformationHead(nn.Module):
+    def __init__(self, num_vertices, sample_num, img_size, feature_channels, intermediate_channels, hidden_dim, scale=0.01):
+        super().__init__()
+        self.num_vertices = num_vertices
+        self.sample_num = sample_num
+        self.img_size = img_size
+        self.feature_channels = feature_channels
+        self.intermediate_channels = intermediate_channels
+        self.hidden_dim = hidden_dim
+        self.scale = scale
+
+        self.upscaling_head = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(self.feature_channels, self.hidden_dim * 2, 3, padding=1),
+            nn.ReLU(inplace=True),
+
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(self.hidden_dim * 2, self.hidden_dim, 3, padding=1),
+        )
+
+        self.f_head = nn.Conv2d(self.hidden_dim + self.intermediate_channels, self.hidden_dim, 3, padding=1)
+        
+        self.ROI = get_roi(self.sample_num, 8.0, 64)
+        self.interpolation = interpolation_layer()
+        self.feature_extractor = nn.Conv2d(self.hidden_dim, self.hidden_dim, kernel_size=self.sample_num, bias=False)
+        self.projection = nn.Linear(self.hidden_dim+3, 3)
+
+    def forward(self, feature, intermediate_feature, vertices_2d, original_vertices_3d):
+        B = vertices_2d.shape[0]
+        # upscaling feature
+        upscaling_feature = self.upscaling_head(feature)
+        input_feature = torch.cat([upscaling_feature, intermediate_feature], dim=1)
+        input_feature = self.f_head(input_feature)
+
+        #  ROI_features
+        vertices_2d = vertices_2d / 256
+        ROI_anchor, bbox_size, start_anchor = self.ROI(vertices_2d.detach())
+        ROI_anchor = ROI_anchor.view(B, self.num_vertices * self.sample_num * self.sample_num, 2)
+        ROI_feature = self.interpolation(input_feature, ROI_anchor.detach()).view(B, self.num_vertices, self.sample_num, self.sample_num, self.hidden_dim)
+        ROI_feature = ROI_feature.view(B * self.num_vertices, self.sample_num, self.sample_num, self.hidden_dim).permute(0, 3, 2, 1)
+
+        transformed_feature = self.feature_extractor(ROI_feature).view(B, self.num_vertices, self.hidden_dim)
+        transformed_feature = torch.cat([transformed_feature, original_vertices_3d], dim=2)
+        deformation = self.projection(transformed_feature)
+        return deformation
+
+
 class FlameRegression(nn.Module):
     def __init__(self, model_config: Dict[str, Any], consts_config: Dict[str, Any], flame_indices_config: Dict[str, Any], num_classes: int = 68, only_face: bool = False):
         super().__init__()
@@ -196,7 +243,7 @@ class FlameRegression(nn.Module):
         self.num_vertices = num_vertices
         self.flame_faces = torch.load('model_training/model/static/flame_mesh_faces.pt')
 
-        self.deformation_type = "MLP"  # "SLPT" or "None"
+        self.deformation_type = "SLPT"  # "SLPT" or "None"
 
         if self.deformation_type == "MLP":
             pre_residual_head_in_dim = model_config["num_filters"] + model_config["num_classes"] + 1 + 1 + self.encoder.encoder_channels["layer1"]
@@ -208,7 +255,23 @@ class FlameRegression(nn.Module):
                 scale=0.01
             )
         elif self.deformation_type == "SLPT":
-            pass
+            self.slpt_deformation_head = SLPTDeformationHead(
+                num_vertices=num_vertices,
+                sample_num=5,
+                img_size=self._img_size,
+                feature_channels=model_config["num_filters"] + self.encoder.encoder_channels["layer1"],
+                intermediate_channels=model_config["num_classes"] + 1 + 1,
+                hidden_dim=256,
+                scale=0.01
+            )
+            self.Sample_num = 5
+            pre_residual_head_in_dim = model_config["num_filters"] + model_config["num_classes"] + 1 + 1 + self.encoder.encoder_channels["layer1"]
+            self.conv1 = nn.Conv2d(pre_residual_head_in_dim, 256, kernel_size=1)
+            self.ROI_1 = get_roi(self.Sample_num, 8.0, 64)
+            self.interpolation = interpolation_layer()
+            self.feature_extractor = nn.Conv2d(256, 256, kernel_size=self.Sample_num, bias=False)
+            self.projection = nn.Linear(256+3, 3)
+        
 
     def compute_vertex_visibility_torch(
         self,
@@ -321,8 +384,13 @@ class FlameRegression(nn.Module):
             )
             pass
         elif self.deformation_type == "SLPT":
+            residual_deformation = self.slpt_deformation_head(torch.cat([x, decoder_output[2]], dim=1), torch.cat([heatmap, depth, region], dim=1), vertices_2d[:, self.refined_indices, :], vertices_3d[:, self.refined_indices, :])
+            vertices_3d_refined[:, self.refined_indices] = (
+                vertices_3d_refined[:, self.refined_indices] + residual_deformation
+            )
             pass
         elif self.deformation_type == "None":
+            residual_deformation = torch.zeros_like(vertices_3d_refined[:, self.refined_indices])
             pass
 
         vertices_2d_refined = self.head_mesh.reprojected_vertices_from_vertices_3d(vertices_3d_refined, params_3dmm, to_2d=True)
