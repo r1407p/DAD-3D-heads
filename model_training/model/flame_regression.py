@@ -22,6 +22,8 @@ from torch.nn import functional as F
 import os
 import numpy as np
 from typing import Optional
+from model_training.model.SLPT import get_roi, interpolation_layer
+
 
 __all__ = ["FlameRegression"]
 
@@ -187,8 +189,12 @@ class FlameRegression(nn.Module):
         self.only_face = only_face
         if only_face:
             num_vertices = len(self.flame_indices['face'])
+            self.refined_indices = self.flame_indices['face']
         else:
             num_vertices = 5023  # FLAME vertex count
+            self.refined_indices = np.arange(5023)
+        self.num_vertices = num_vertices
+        
 
         pre_residual_head_in_dim = model_config["num_filters"] + model_config["num_classes"] + 1 + 1 + self.encoder.encoder_channels["layer1"]
         self.pre_residual_head = nn.Conv2d(pre_residual_head_in_dim, 256, kernel_size=1)
@@ -277,23 +283,23 @@ class FlameRegression(nn.Module):
         return visibility
 
     def forward(self, x):
-        encoder_output = []
+        encoder_output = [] # [(bs, 64, 64, 64), (bs, 256, 64, 64), (bs, 512, 32, 32), (bs, 1024, 16, 16)]
         for stage in self.encoder.stages[: self.max_layer]:
             x = stage(x)
             encoder_output.append(x)
-        decoder_output = self.bifpn(encoder_output[1:])
-        heatmap = self.head(decoder_output)
-        depth = self.depth(decoder_output)
-        region = self.region(decoder_output)
-        fmap = self.fusion_layer(x, heatmap, depth, region, decoder_output[2])
-        fmap = self.encoder.stages[-1](fmap)
-        shape = self.shape(fmap).tanh() * self.limit_value
-        pose = self.pose(fmap)
-        landmarks = self.landmarks(fmap)
+        decoder_output = self.bifpn(encoder_output[1:]) # [(bs, 256, 64, 64), (bs, 256, 32, 32), (bs, 256, 16, 16), (bs, 256, 8, 8), (bs, 256, 4, 4)]
+        heatmap = self.head(decoder_output) # (bs, 68, 64, 64)
+        depth = self.depth(decoder_output) # (bs, 1, 64, 64)
+        region = self.region(decoder_output) # (bs, 1, 64, 64)
+        fmap = self.fusion_layer(x, heatmap, depth, region, decoder_output[2]) # (bs, 1024, 16, 16)
+        fmap = self.encoder.stages[-1](fmap) # (bs, 2048, 8, 8)
+        shape = self.shape(fmap).tanh() * self.limit_value # (bs, 403)
+        pose = self.pose(fmap) # (bs, 10)
+        landmarks = self.landmarks(fmap) # (bs, 136)
         B, N = landmarks.size()
-        landmarks = F.relu(landmarks.reshape((B, N // 2, 2)), inplace=True)
+        landmarks = F.relu(landmarks.reshape((B, N // 2, 2)), inplace=True) # (bs, 68, 2)
 
-        params_3dmm = torch.cat([shape, pose], dim=1)
+        params_3dmm = torch.cat([shape, pose], dim=1) # (bs, 413)
         
         # Compute 3D vertices and 2D reprojected vertices from 3DMM params
         vertices_3d = self.head_mesh.vertices_3d(params_3dmm=params_3dmm, zero_rotation=True)
